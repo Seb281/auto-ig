@@ -16,7 +16,10 @@ WorkingDirectory=/home/ubuntu/auto-ig
 EnvironmentFile=/home/ubuntu/auto-ig/.env
 
 # Launch via the virtualenv Python
-ExecStart=/home/ubuntu/auto-ig/.venv/bin/python main.py --account veggie_alternatives
+# Single account:
+#   ExecStart=/home/ubuntu/auto-ig/.venv/bin/python main.py --account veggie_alternatives
+# Multi-account (all accounts share one Telegram bot, each has its own scheduler):
+ExecStart=/home/ubuntu/auto-ig/.venv/bin/python main.py --account veggie_alternatives --account fitness_meals
 
 # --- Restart policy ---
 Restart=on-failure

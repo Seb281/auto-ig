@@ -63,12 +63,15 @@ Meta Graph API must be able to reach the temporary image server. This requires o
    - Destination Port Range: `8765`
 4. Save
 
+**Multi-account note**: If you run multiple accounts with different `temp_http_port` values (e.g., 8765 and 8766), open all ports in the Security List.
+
 ### 2b. VM-level firewall (iptables)
 
 The setup script handles this automatically. To do it manually:
 
 ```bash
 sudo iptables -I INPUT -p tcp --dport 8765 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 8766 -j ACCEPT  # second account
 sudo apt-get install -y iptables-persistent
 sudo netfilter-persistent save
 ```
@@ -136,6 +139,13 @@ TELEGRAM_CHAT_ID=...        # Your Telegram chat ID
 PUBLIC_IP=<your VM public IP>
 ```
 
+For multi-account, add additional account-specific variables:
+
+```
+FITNESS_IG_TOKEN=...             # Second account's Meta token
+FITNESS_TELEGRAM_CHAT_ID=...     # Second account's Telegram chat ID
+```
+
 ### Getting a non-expiring Meta token
 
 Standard User Access Tokens expire every 60 days. Use a **System User token** instead:
@@ -193,9 +203,12 @@ Before enabling live publishing, run a dry-run to verify the full pipeline:
 # Stop the service temporarily
 sudo systemctl stop auto-ig
 
-# Run manually with --dry-run
+# Run manually with --dry-run (single account)
 cd ~/auto-ig
 .venv/bin/python main.py --account veggie_alternatives --dry-run
+
+# Run manually with --dry-run (multi-account)
+.venv/bin/python main.py --account veggie_alternatives --account fitness_meals --dry-run
 ```
 
 Then send `/run` to your Telegram bot. The pipeline will:
@@ -245,7 +258,7 @@ sudo systemctl start auto-ig
 
 ## 9. Backup
 
-The SQLite database at `accounts/veggie_alternatives/post_history.db` contains all post history, pending drafts, and schedule configuration. Back it up periodically:
+The SQLite database at `accounts/<account_id>/post_history.db` contains all post history, pending drafts, and schedule configuration. Back it up periodically:
 
 ```bash
 # Manual backup
@@ -261,6 +274,66 @@ crontab -e
 
 ---
 
+## 10. Multi-account setup
+
+auto-ig supports running multiple Instagram accounts from a single process. Each account has:
+- Its own `accounts/<account_id>/config.yaml` configuration
+- Its own `post_history.db` SQLite database
+- Its own scheduler job (independent posting frequency and timing)
+- Its own Telegram chat ID for routing commands
+
+### Requirements
+
+1. **Same Telegram bot token**: All accounts must share the same Telegram bot. Each account routes commands via its unique `telegram_chat_id_env` value.
+2. **Different chat IDs**: Each account must have a distinct Telegram chat ID. You can use group chats or individual chats to separate them.
+3. **Different temp_http_port**: Each account should use a unique `temp_http_port` in its config to avoid port conflicts during simultaneous publishes.
+
+### Adding a new account
+
+1. Create a new account directory:
+   ```bash
+   mkdir -p accounts/my_new_account
+   ```
+
+2. Create `accounts/my_new_account/config.yaml` (copy and modify from an existing account):
+   ```bash
+   cp accounts/veggie_alternatives/config.yaml accounts/my_new_account/config.yaml
+   nano accounts/my_new_account/config.yaml
+   ```
+   Key fields to change:
+   - `account_id`: must match the directory name
+   - `instagram_user_id`: the new account's IG user ID
+   - `access_token_env`: unique env var name (e.g., `MY_NEW_IG_TOKEN`)
+   - `telegram_chat_id_env`: unique env var name (e.g., `MY_NEW_TELEGRAM_CHAT_ID`)
+   - `temp_http_port`: unique port number (e.g., 8767)
+   - `niche`, `content_pillars`, `tone`, etc.: customize for the new account
+
+3. Add the new env vars to `.env`:
+   ```
+   MY_NEW_IG_TOKEN=...
+   MY_NEW_TELEGRAM_CHAT_ID=...
+   ```
+
+4. Open the new temp_http_port in Oracle Cloud Security List and iptables.
+
+5. Update the systemd service or restart command:
+   ```bash
+   .venv/bin/python main.py --account veggie_alternatives --account my_new_account
+   ```
+
+6. Or update `deploy/auto-ig.service` ExecStart line and run:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl restart auto-ig
+   ```
+
+### Current limitations
+
+- All accounts must share the same Telegram bot token. If you need separate bots per account, run separate auto-ig processes.
+- Accounts with overlapping `temp_http_port` values will fail if two pipelines try to publish simultaneously. Use unique ports.
+
+---
+
 ## Troubleshooting
 
 ### Service fails to start
@@ -272,7 +345,7 @@ journalctl -u auto-ig -n 50 --no-pager
 Common causes:
 - **Missing env vars**: `ValueError: Missing or empty environment variables: ...`
   - Fix: edit `.env` and fill in all required keys
-- **Config file not found**: check `accounts/veggie_alternatives/config.yaml` exists
+- **Config file not found**: check `accounts/<account_id>/config.yaml` exists
 - **Python not found**: verify `.venv/bin/python` exists; re-run `deploy/setup.sh`
 
 ### Meta API returns auth errors

@@ -3,6 +3,10 @@
 Implements the full Telegram control interface for auto-ig using
 python-telegram-bot v20+ (async/polling). All state is persisted in SQLite
 via the pending_drafts table so the 2h auto-publish timer survives restarts.
+
+Supports multi-account: commands are routed to the correct account based on
+the incoming chat_id. Each account's config, db_path, and dry_run flag are
+stored in bot_data["accounts"][chat_id].
 """
 
 import asyncio
@@ -25,7 +29,7 @@ from telegram.ext import (
 
 from agents import PipelineResult, PlannerBrief
 from agents.orchestrator import run_pipeline
-from publisher.scheduler import get_next_run_time, schedule_pipeline_job
+from publisher.scheduler import get_next_run_time, pipeline_job_id, schedule_pipeline_job
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
@@ -38,6 +42,25 @@ def _read_file_bytes(path: str) -> bytes:
     """Read a file's contents as bytes (meant to be called via asyncio.to_thread)."""
     with open(path, "rb") as f:
         return f.read()
+
+
+# ---------------------------------------------------------------------------
+# Multi-account context helpers
+# ---------------------------------------------------------------------------
+
+def _get_account_context(bot_data: dict, chat_id: int) -> dict | None:
+    """Look up account context (config, db_path, dry_run) by chat_id."""
+    accounts = bot_data.get("accounts", {})
+    return accounts.get(chat_id)
+
+
+def _get_account_context_from_update(
+    bot_data: dict, update: Update
+) -> dict | None:
+    """Extract account context from an Update's effective chat."""
+    if update.effective_chat is None:
+        return None
+    return _get_account_context(bot_data, update.effective_chat.id)
 
 
 # ---------------------------------------------------------------------------
@@ -221,16 +244,21 @@ async def _upsert_schedule_config(
 # Auto-publish timer
 # ---------------------------------------------------------------------------
 
+def _auto_publish_task_key(account_id: str) -> str:
+    """Return the bot_data key for an account's auto-publish asyncio task."""
+    return f"auto_publish_task_{account_id}"
+
+
 async def _auto_publish_draft(
+    acct_ctx: dict,
     bot_data: dict,
     draft: dict,
     chat_id: int,
     application: Application,
 ) -> None:
     """Publish a draft after the auto-publish timeout elapses."""
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
-    dry_run: bool = bot_data["dry_run"]
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
     draft_id = draft["id"]
 
     # Calculate wait time from now until publish_at
@@ -240,8 +268,9 @@ async def _auto_publish_draft(
 
     if delay > 0:
         logger.info(
-            "Auto-publish timer started for draft %d — %.0f seconds remaining.",
+            "Auto-publish timer started for draft %d (account '%s') — %.0f seconds remaining.",
             draft_id,
+            config.account_id,
             delay,
         )
         await asyncio.sleep(delay)
@@ -256,10 +285,11 @@ async def _auto_publish_draft(
 
     # Publish
     logger.info("Auto-publish timeout reached for draft %d.", draft_id)
-    await _do_publish_draft(bot_data, draft, chat_id, application, auto=True)
+    await _do_publish_draft(acct_ctx, bot_data, draft, chat_id, application, auto=True)
 
 
 async def _do_publish_draft(
+    acct_ctx: dict,
     bot_data: dict,
     draft: dict,
     chat_id: int,
@@ -267,9 +297,9 @@ async def _do_publish_draft(
     auto: bool = False,
 ) -> None:
     """Execute the actual publish for a draft (shared by approve and auto-publish)."""
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
-    dry_run: bool = bot_data["dry_run"]
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+    dry_run: bool = acct_ctx["dry_run"]
     draft_id = draft["id"]
 
     caption = draft["caption"]
@@ -332,27 +362,32 @@ async def _do_publish_draft(
                 logger.warning("Failed to clean up image %s: %s", image_path, exc)
 
     # Clear the auto-publish task reference
-    bot_data.pop("auto_publish_task", None)
+    task_key = _auto_publish_task_key(config.account_id)
+    bot_data.pop(task_key, None)
 
 
 def _start_auto_publish_timer(
+    acct_ctx: dict,
     bot_data: dict,
     draft: dict,
     chat_id: int,
     application: Application,
 ) -> None:
     """Schedule the auto-publish coroutine and store the task handle."""
-    # Cancel any existing timer
-    existing_task = bot_data.get("auto_publish_task")
+    config: AccountConfig = acct_ctx["config"]
+    task_key = _auto_publish_task_key(config.account_id)
+
+    # Cancel any existing timer for this account
+    existing_task = bot_data.get(task_key)
     if existing_task is not None and not existing_task.done():
         existing_task.cancel()
-        logger.info("Cancelled previous auto-publish timer.")
+        logger.info("Cancelled previous auto-publish timer for '%s'.", config.account_id)
 
     task = asyncio.create_task(
-        _auto_publish_draft(bot_data, draft, chat_id, application)
+        _auto_publish_draft(acct_ctx, bot_data, draft, chat_id, application)
     )
-    bot_data["auto_publish_task"] = task
-    logger.info("Auto-publish timer scheduled for draft %d.", draft["id"])
+    bot_data[task_key] = task
+    logger.info("Auto-publish timer scheduled for draft %d (account '%s').", draft["id"], config.account_id)
 
 
 # ---------------------------------------------------------------------------
@@ -366,8 +401,13 @@ async def send_draft_for_review(
     bot_data: dict,
 ) -> None:
     """Send a draft (image + caption preview) to Telegram and start the auto-publish timer."""
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
+    acct_ctx = _get_account_context(bot_data, chat_id)
+    if acct_ctx is None:
+        logger.error("No account context found for chat_id=%d in send_draft_for_review.", chat_id)
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
 
     if result.image is None or result.caption is None or result.brief is None:
         await application.bot.send_message(
@@ -403,13 +443,13 @@ async def send_draft_for_review(
         await application.bot.send_photo(
             chat_id=chat_id,
             photo=photo_bytes,
-            caption=f"Draft #{draft_id} ready for review",
+            caption=f"[{config.account_id}] Draft #{draft_id} ready for review",
         )
     except Exception as exc:
         logger.error("Failed to send draft photo: %s", exc)
         await application.bot.send_message(
             chat_id=chat_id,
-            text=f"Draft #{draft_id} ready (could not send image: {exc})",
+            text=f"[{config.account_id}] Draft #{draft_id} ready (could not send image: {exc})",
         )
 
     # Send caption preview
@@ -419,7 +459,7 @@ async def send_draft_for_review(
     # Load the draft back so we have the full row
     draft = await _get_pending_draft(db_path, config.account_id)
     if draft is not None:
-        _start_auto_publish_timer(bot_data, draft, chat_id, application)
+        _start_auto_publish_timer(acct_ctx, bot_data, draft, chat_id, application)
 
 
 async def send_escalation(
@@ -480,10 +520,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /run — trigger a pipeline run."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
-    dry_run: bool = bot_data["dry_run"]
-    chat_id = int(os.getenv(config.telegram_chat_id_env, "0"))
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+    dry_run: bool = acct_ctx["dry_run"]
+    chat_id = update.effective_chat.id
 
     # Check for existing pending draft
     pending = await _get_pending_draft(db_path, config.account_id)
@@ -493,16 +538,18 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Check if a pipeline is already running
-    if bot_data.get("pipeline_running"):
+    # Check if a pipeline is already running for this account
+    pipeline_key = f"pipeline_running_{config.account_id}"
+    if bot_data.get(pipeline_key):
         await update.message.reply_text("A pipeline run is already in progress.")
         return
 
-    bot_data["pipeline_running"] = True
-    await update.message.reply_text("Starting pipeline run...")
+    bot_data[pipeline_key] = True
+    await update.message.reply_text(f"[{config.account_id}] Starting pipeline run...")
 
     try:
-        user_hint = bot_data.pop("suggested_topic", None)
+        suggest_key = f"suggested_topic_{config.account_id}"
+        user_hint = bot_data.pop(suggest_key, None)
 
         result: PipelineResult = await run_pipeline(
             config=config,
@@ -539,15 +586,20 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     finally:
-        bot_data["pipeline_running"] = False
+        bot_data[pipeline_key] = False
 
 
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /approve — publish the pending draft immediately."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
-    chat_id = int(os.getenv(config.telegram_chat_id_env, "0"))
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+    chat_id = update.effective_chat.id
 
     draft = await _get_pending_draft(db_path, config.account_id)
     if draft is None:
@@ -555,13 +607,14 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Cancel auto-publish timer
-    task = bot_data.get("auto_publish_task")
+    task_key = _auto_publish_task_key(config.account_id)
+    task = bot_data.get(task_key)
     if task is not None and not task.done():
         task.cancel()
-        bot_data.pop("auto_publish_task", None)
+        bot_data.pop(task_key, None)
 
     await update.message.reply_text("Publishing draft...")
-    await _do_publish_draft(bot_data, draft, chat_id, context.application, auto=False)
+    await _do_publish_draft(acct_ctx, bot_data, draft, chat_id, context.application, auto=False)
 
 
 async def cmd_approve_anyway(
@@ -575,8 +628,13 @@ async def cmd_approve_anyway(
 async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /skip — discard draft, trigger a new pipeline run."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
 
     draft = await _get_pending_draft(db_path, config.account_id)
     if draft is None:
@@ -584,10 +642,11 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Cancel auto-publish timer
-    task = bot_data.get("auto_publish_task")
+    task_key = _auto_publish_task_key(config.account_id)
+    task = bot_data.get(task_key)
     if task is not None and not task.done():
         task.cancel()
-        bot_data.pop("auto_publish_task", None)
+        bot_data.pop(task_key, None)
 
     await _update_draft_status(db_path, draft["id"], "skipped")
 
@@ -609,16 +668,22 @@ async def cmd_skip_today(
 ) -> None:
     """Handle /skip_today — skip today's post entirely."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
 
     draft = await _get_pending_draft(db_path, config.account_id)
     if draft is not None:
         # Cancel auto-publish timer
-        task = bot_data.get("auto_publish_task")
+        task_key = _auto_publish_task_key(config.account_id)
+        task = bot_data.get(task_key)
         if task is not None and not task.done():
             task.cancel()
-            bot_data.pop("auto_publish_task", None)
+            bot_data.pop(task_key, None)
 
         await _update_draft_status(db_path, draft["id"], "skipped")
 
@@ -636,9 +701,14 @@ async def cmd_skip_today(
 async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /edit <new caption> — replace caption on pending draft, then publish."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
-    chat_id = int(os.getenv(config.telegram_chat_id_env, "0"))
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+    chat_id = update.effective_chat.id
 
     if not context.args:
         await update.message.reply_text("Usage: /edit <new caption text>")
@@ -652,17 +722,18 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Cancel auto-publish timer
-    task = bot_data.get("auto_publish_task")
+    task_key = _auto_publish_task_key(config.account_id)
+    task = bot_data.get(task_key)
     if task is not None and not task.done():
         task.cancel()
-        bot_data.pop("auto_publish_task", None)
+        bot_data.pop(task_key, None)
 
     await _update_draft_caption(db_path, draft["id"], new_caption)
     # Refresh draft with new caption
     draft["caption"] = new_caption
 
     await update.message.reply_text("Caption updated. Publishing...")
-    await _do_publish_draft(bot_data, draft, chat_id, context.application, auto=False)
+    await _do_publish_draft(acct_ctx, bot_data, draft, chat_id, context.application, auto=False)
 
 
 async def cmd_regenerate(
@@ -670,16 +741,22 @@ async def cmd_regenerate(
 ) -> None:
     """Handle /regenerate — discard draft and regenerate from scratch."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
 
     draft = await _get_pending_draft(db_path, config.account_id)
     if draft is not None:
         # Cancel auto-publish timer
-        task = bot_data.get("auto_publish_task")
+        task_key = _auto_publish_task_key(config.account_id)
+        task = bot_data.get(task_key)
         if task is not None and not task.done():
             task.cancel()
-            bot_data.pop("auto_publish_task", None)
+            bot_data.pop(task_key, None)
 
         await _update_draft_status(db_path, draft["id"], "skipped")
 
@@ -700,10 +777,15 @@ async def cmd_regenerate(
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /status — show last run info and schedule."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
 
-    lines: list[str] = []
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+
+    lines: list[str] = [f"Account: {config.account_id}", ""]
 
     # Last published post
     async with aiosqlite.connect(db_path) as db:
@@ -733,10 +815,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines.append(f"Preferred time: {config.preferred_time} (default)")
         lines.append("Paused: No")
 
-    # Next scheduled run
+    # Next scheduled run (per-account job ID)
     scheduler = bot_data.get("scheduler")
     if scheduler is not None:
-        next_run = get_next_run_time(scheduler)
+        job_id = pipeline_job_id(config.account_id)
+        next_run = get_next_run_time(scheduler, job_id)
         if next_run:
             lines.append(f"Next run: {next_run}")
         else:
@@ -754,7 +837,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines.append("No pending draft.")
 
     # Pipeline running
-    if bot_data.get("pipeline_running"):
+    pipeline_key = f"pipeline_running_{config.account_id}"
+    if bot_data.get(pipeline_key):
         lines.append("Pipeline: RUNNING")
 
     await update.message.reply_text("\n".join(lines))
@@ -762,58 +846,82 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /suggest <topic> — queue a topic hint for the next run."""
+    bot_data = context.application.bot_data
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
     if not context.args:
         await update.message.reply_text("Usage: /suggest <topic or hint>")
         return
 
+    config: AccountConfig = acct_ctx["config"]
     topic = " ".join(context.args)
-    context.application.bot_data["suggested_topic"] = topic
-    await update.message.reply_text(f"Topic suggestion queued: {topic}")
+    suggest_key = f"suggested_topic_{config.account_id}"
+    bot_data[suggest_key] = topic
+    await update.message.reply_text(f"[{config.account_id}] Topic suggestion queued: {topic}")
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /pause — pause the scheduler."""
+    """Handle /pause — pause the scheduler for this account."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
 
     await _upsert_schedule_config(db_path, config.account_id, paused=1)
 
-    # Pause the APScheduler if it is wired up
+    # Pause the specific account's scheduler job
     scheduler = bot_data.get("scheduler")
     if scheduler is not None:
-        scheduler.pause()
-        logger.info("Scheduler paused via /pause command.")
+        job_id = pipeline_job_id(config.account_id)
+        job = scheduler.get_job(job_id)
+        if job is not None:
+            job.pause()
+            logger.info("Scheduler job '%s' paused via /pause command.", job_id)
 
-    await update.message.reply_text("Scheduler paused.")
+    await update.message.reply_text(f"[{config.account_id}] Scheduler paused.")
 
 
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /resume — resume the scheduler."""
+    """Handle /resume — resume the scheduler for this account."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
 
     await _upsert_schedule_config(db_path, config.account_id, paused=0)
 
-    # Resume the APScheduler if it is wired up
+    # Resume the specific account's scheduler job
     scheduler = bot_data.get("scheduler")
     if scheduler is not None:
-        scheduler.resume()
-        logger.info("Scheduler resumed via /resume command.")
+        job_id = pipeline_job_id(config.account_id)
+        job = scheduler.get_job(job_id)
+        if job is not None:
+            job.resume()
+            logger.info("Scheduler job '%s' resumed via /resume command.", job_id)
 
-    await update.message.reply_text("Scheduler resumed.")
-
+    await update.message.reply_text(f"[{config.account_id}] Scheduler resumed.")
 
 
 async def _reschedule_from_db(
     bot_data: dict, db_path: str, config: AccountConfig
 ) -> None:
     """Re-read schedule_config from DB and reschedule the APScheduler job."""
-    scheduler = bot_data.get('scheduler')
-    job_func = bot_data.get('scheduled_run_func')
+    scheduler = bot_data.get("scheduler")
+    run_func_key = f"scheduled_run_func_{config.account_id}"
+    job_func = bot_data.get(run_func_key)
     if scheduler is None or job_func is None:
-        logger.warning('Scheduler not wired up — cannot reschedule.')
+        logger.warning("Scheduler not wired up — cannot reschedule.")
         return
 
     sched = await _get_schedule_config(db_path, config.account_id)
@@ -823,11 +931,12 @@ async def _reschedule_from_db(
     schedule_pipeline_job(
         scheduler=scheduler,
         job_func=job_func,
-        frequency=sched['frequency'],
-        preferred_time=sched['preferred_time'],
-        timezone_str=sched['timezone'],
+        frequency=sched["frequency"],
+        preferred_time=sched["preferred_time"],
+        timezone_str=sched["timezone"],
+        account_id=config.account_id,
     )
-    logger.info('Rescheduled pipeline job after /setfrequency change.')
+    logger.info("Rescheduled pipeline job for '%s' after /setfrequency change.", config.account_id)
 
 
 async def cmd_setfrequency(
@@ -835,8 +944,13 @@ async def cmd_setfrequency(
 ) -> None:
     """Handle /setfrequency <value> — change posting schedule."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
 
     if not context.args:
         await update.message.reply_text(
@@ -863,7 +977,7 @@ async def cmd_setfrequency(
             # Reschedule the APScheduler job with the new time
             await _reschedule_from_db(bot_data, db_path, config)
             await update.message.reply_text(
-                f"Posting time changed to {formatted_time}."
+                f"[{config.account_id}] Posting time changed to {formatted_time}."
             )
             return
         except (ValueError, IndexError):
@@ -882,7 +996,7 @@ async def cmd_setfrequency(
     await _upsert_schedule_config(db_path, config.account_id, frequency=value)
     # Reschedule the APScheduler job with the new frequency
     await _reschedule_from_db(bot_data, db_path, config)
-    await update.message.reply_text(f"Posting frequency changed to {value}.")
+    await update.message.reply_text(f"[{config.account_id}] Posting frequency changed to {value}.")
 
 
 # ---------------------------------------------------------------------------
@@ -892,10 +1006,15 @@ async def cmd_setfrequency(
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user-sent photos — save and run pipeline with the photo."""
     bot_data = context.application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
-    dry_run: bool = bot_data["dry_run"]
-    chat_id = int(os.getenv(config.telegram_chat_id_env, "0"))
+    acct_ctx = _get_account_context_from_update(bot_data, update)
+    if acct_ctx is None:
+        await update.message.reply_text("No account is configured for this chat.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+    dry_run: bool = acct_ctx["dry_run"]
+    chat_id = update.effective_chat.id
 
     # Check for existing pending draft
     pending = await _get_pending_draft(db_path, config.account_id)
@@ -905,7 +1024,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    if bot_data.get("pipeline_running"):
+    pipeline_key = f"pipeline_running_{config.account_id}"
+    if bot_data.get(pipeline_key):
         await update.message.reply_text("A pipeline run is already in progress.")
         return
 
@@ -924,9 +1044,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Extract hint from caption (if any)
     user_hint = update.message.caption
 
-    bot_data["pipeline_running"] = True
+    bot_data[pipeline_key] = True
     await update.message.reply_text(
-        "Photo received. Running pipeline with your image..."
+        f"[{config.account_id}] Photo received. Running pipeline with your image..."
     )
 
     try:
@@ -958,7 +1078,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await send_pipeline_error(context.application, chat_id, str(exc))
 
     finally:
-        bot_data["pipeline_running"] = False
+        bot_data[pipeline_key] = False
         # Clean up user photo (pipeline makes its own copy)
         if os.path.exists(user_photo_path):
             try:
@@ -972,38 +1092,42 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ---------------------------------------------------------------------------
 
 async def _resume_overdue_drafts(application: Application) -> None:
-    """On startup, find overdue pending drafts and auto-publish them."""
+    """On startup, find overdue pending drafts and auto-publish them for all accounts."""
     bot_data = application.bot_data
-    config: AccountConfig = bot_data["config"]
-    db_path: str = bot_data["db_path"]
-    chat_id = int(os.getenv(config.telegram_chat_id_env, "0"))
+    accounts = bot_data.get("accounts", {})
 
-    draft = await _get_pending_draft(db_path, config.account_id)
-    if draft is None:
-        logger.info("No pending drafts to resume on startup.")
-        return
+    for chat_id, acct_ctx in accounts.items():
+        config: AccountConfig = acct_ctx["config"]
+        db_path: str = acct_ctx["db_path"]
 
-    publish_at = datetime.fromisoformat(draft["publish_at"])
-    now = datetime.now(timezone.utc)
+        draft = await _get_pending_draft(db_path, config.account_id)
+        if draft is None:
+            logger.info("No pending drafts to resume for account '%s'.", config.account_id)
+            continue
 
-    if now >= publish_at:
-        logger.info(
-            "Overdue draft %d found (publish_at=%s). Auto-publishing now.",
-            draft["id"],
-            draft["publish_at"],
-        )
-        await application.bot.send_message(
-            chat_id=chat_id,
-            text=f"Resuming overdue draft #{draft['id']} — auto-publishing now.",
-        )
-        await _do_publish_draft(bot_data, draft, chat_id, application, auto=True)
-    else:
-        logger.info(
-            "Pending draft %d found (publish_at=%s). Restarting auto-publish timer.",
-            draft["id"],
-            draft["publish_at"],
-        )
-        _start_auto_publish_timer(bot_data, draft, chat_id, application)
+        publish_at = datetime.fromisoformat(draft["publish_at"])
+        now = datetime.now(timezone.utc)
+
+        if now >= publish_at:
+            logger.info(
+                "Overdue draft %d found for '%s' (publish_at=%s). Auto-publishing now.",
+                draft["id"],
+                config.account_id,
+                draft["publish_at"],
+            )
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=f"[{config.account_id}] Resuming overdue draft #{draft['id']} — auto-publishing now.",
+            )
+            await _do_publish_draft(acct_ctx, bot_data, draft, chat_id, application, auto=True)
+        else:
+            logger.info(
+                "Pending draft %d found for '%s' (publish_at=%s). Restarting auto-publish timer.",
+                draft["id"],
+                config.account_id,
+                draft["publish_at"],
+            )
+            _start_auto_publish_timer(acct_ctx, bot_data, draft, chat_id, application)
 
 
 # ---------------------------------------------------------------------------
@@ -1011,15 +1135,26 @@ async def _resume_overdue_drafts(application: Application) -> None:
 # ---------------------------------------------------------------------------
 
 def build_application(
-    config: AccountConfig,
-    db_path: str,
-    dry_run: bool = False,
+    accounts: list[tuple[AccountConfig, str, bool]],
 ) -> Application:
-    """Build and configure the Telegram bot Application."""
-    token = os.getenv(config.telegram_bot_token_env)
+    """Build and configure the Telegram bot Application for one or more accounts.
+
+    Args:
+        accounts: List of (config, db_path, dry_run) tuples. All accounts
+                  must share the same Telegram bot token.
+
+    Returns:
+        Configured Application instance ready for initialize() and polling.
+    """
+    if not accounts:
+        raise ValueError("At least one account must be provided.")
+
+    # Use the first account's bot token — all accounts must share it
+    first_config = accounts[0][0]
+    token = os.getenv(first_config.telegram_bot_token_env)
     if not token:
         raise ValueError(
-            f"Telegram bot token env var '{config.telegram_bot_token_env}' is missing or empty."
+            f"Telegram bot token env var '{first_config.telegram_bot_token_env}' is missing or empty."
         )
 
     application = (
@@ -1029,12 +1164,40 @@ def build_application(
         .build()
     )
 
-    # Store shared state in bot_data (populated before initialize() is called,
-    # so post_init callback can access it)
-    application.bot_data["config"] = config
-    application.bot_data["db_path"] = db_path
-    application.bot_data["dry_run"] = dry_run
-    application.bot_data["pipeline_running"] = False
+    # Build accounts dict keyed by chat_id for O(1) lookup in command handlers
+    accounts_by_chat_id: dict[int, dict] = {}
+    for config, db_path, dry_run in accounts:
+        chat_id_str = os.getenv(config.telegram_chat_id_env, "0")
+        try:
+            chat_id = int(chat_id_str)
+        except ValueError:
+            logger.error(
+                "Invalid chat ID '%s' for account '%s' — skipping.",
+                chat_id_str,
+                config.account_id,
+            )
+            continue
+
+        if chat_id == 0:
+            logger.warning(
+                "Chat ID is 0 for account '%s' — env var '%s' may not be set.",
+                config.account_id,
+                config.telegram_chat_id_env,
+            )
+
+        accounts_by_chat_id[chat_id] = {
+            "config": config,
+            "db_path": db_path,
+            "dry_run": dry_run,
+        }
+        logger.info(
+            "Registered account '%s' for chat_id=%d.",
+            config.account_id,
+            chat_id,
+        )
+
+    # Store in bot_data
+    application.bot_data["accounts"] = accounts_by_chat_id
 
     # Register command handlers
     application.add_handler(CommandHandler("start", cmd_start))
@@ -1056,5 +1219,8 @@ def build_application(
         MessageHandler(filters.PHOTO, handle_photo)
     )
 
-    logger.info("Telegram bot application built and configured.")
+    logger.info(
+        "Telegram bot application built — %d account(s) registered.",
+        len(accounts_by_chat_id),
+    )
     return application
