@@ -126,3 +126,51 @@ def build_caption_prompt(config: AccountConfig, brief: PlannerBrief) -> str:
     ]
 
     return "\n".join(lines)
+
+
+def build_vision_scoring_prompt(
+    config: AccountConfig,
+    brief: PlannerBrief,
+) -> str:
+    """Build the prompt for Claude vision scoring of a stock photo candidate."""
+    keywords = ", ".join(brief.visual_keywords) if brief.visual_keywords else brief.topic
+    banned = ", ".join(config.banned_topics)
+
+    lines = [
+        f"You are evaluating a stock photo for an Instagram account about {config.niche}.",
+        f"Visual style: {config.visual_style}.",
+        f"Banned topics (image must NOT depict): {banned}.",
+        "",
+        "Content brief for this post:",
+        f"  Topic: {brief.topic}",
+        f"  Angle: {brief.angle}",
+        f"  Mood: {brief.mood}",
+        f"  Visual keywords: {keywords}",
+        "",
+        "Score this image from 0.0 to 1.0 based on:",
+        "- Relevance to the topic and visual keywords",
+        "- Brand fit (natural food photography, bright, farm-fresh aesthetic)",
+        "- Quality (resolution, composition, lighting)",
+        "- No banned content depicted",
+        "",
+        "Return your answer as strict JSON with NO extra text:",
+        '{"score": 0.0, "reasoning": "..."}',
+    ]
+
+    return "\n".join(lines)
+
+
+def build_dalle_prompt(
+    config: AccountConfig,
+    brief: PlannerBrief,
+) -> str:
+    """Build a DALL-E 3 image generation prompt from the content brief."""
+    keywords = ", ".join(brief.visual_keywords) if brief.visual_keywords else brief.topic
+
+    return (
+        f"Natural food photography. {keywords}. "
+        f"{config.visual_style}. "
+        "No text overlays, no people, no watermarks. "
+        "Square composition, 1:1 aspect ratio. "
+        "High quality, professional food photography with natural lighting."
+    )
