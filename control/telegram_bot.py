@@ -88,7 +88,7 @@ def _format_draft_preview(caption: str, hashtags: list[str]) -> str:
     return "\n".join(lines)
 
 
-async def _get_pending_draft(db_path: str, account_id: str) -> dict | None:
+async def get_pending_draft(db_path: str, account_id: str) -> dict | None:
     """Return the most recent pending draft as a dict, or None."""
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
@@ -132,6 +132,7 @@ async def _save_pending_draft(
     db_path: str,
     account_id: str,
     image_path: str,
+    image_phash: str,
     caption: str,
     hashtags: list[str],
     alt_text: str,
@@ -146,13 +147,14 @@ async def _save_pending_draft(
         cursor = await db.execute(
             """
             INSERT INTO pending_drafts
-                (account_id, image_path, caption, hashtags, alt_text,
+                (account_id, image_path, image_phash, caption, hashtags, alt_text,
                  brief_json, created_at, publish_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
             """,
             (
                 account_id,
                 image_path,
+                image_phash,
                 caption,
                 json.dumps(hashtags),
                 alt_text,
@@ -276,7 +278,7 @@ async def _auto_publish_draft(
         await asyncio.sleep(delay)
 
     # Re-check status — user may have already acted
-    current = await _get_pending_draft(db_path, config.account_id)
+    current = await get_pending_draft(db_path, config.account_id)
     if current is None or current["id"] != draft_id or current["status"] != "pending":
         logger.info(
             "Draft %d is no longer pending — auto-publish cancelled.", draft_id
@@ -306,6 +308,7 @@ async def _do_publish_draft(
     hashtags = json.loads(draft["hashtags"])
     alt_text = draft["alt_text"]
     image_path = draft["image_path"]
+    image_phash = draft.get("image_phash", "")
     brief_data = json.loads(draft["brief_json"])
 
     full_caption = _format_draft_caption(caption, hashtags)
@@ -331,7 +334,7 @@ async def _do_publish_draft(
             account_id=config.account_id,
             topic=brief_data.get("topic", "Unknown"),
             content_pillar=brief_data.get("content_pillar", ""),
-            image_phash=brief_data.get("image_phash", ""),
+            image_phash=image_phash,
             caption=full_caption,
             instagram_media_id=media_id,
         )
@@ -430,6 +433,7 @@ async def send_draft_for_review(
         db_path=db_path,
         account_id=config.account_id,
         image_path=draft_image_path,
+        image_phash=result.image.phash,
         caption=result.caption.caption,
         hashtags=result.caption.hashtags,
         alt_text=result.caption.alt_text,
@@ -457,7 +461,7 @@ async def send_draft_for_review(
     await application.bot.send_message(chat_id=chat_id, text=preview)
 
     # Load the draft back so we have the full row
-    draft = await _get_pending_draft(db_path, config.account_id)
+    draft = await get_pending_draft(db_path, config.account_id)
     if draft is not None:
         _start_auto_publish_timer(acct_ctx, bot_data, draft, chat_id, application)
 
@@ -531,7 +535,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
 
     # Check for existing pending draft
-    pending = await _get_pending_draft(db_path, config.account_id)
+    pending = await get_pending_draft(db_path, config.account_id)
     if pending is not None:
         await update.message.reply_text(
             "A draft is already pending. Use /approve, /skip, or wait for auto-publish."
@@ -601,7 +605,7 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     db_path: str = acct_ctx["db_path"]
     chat_id = update.effective_chat.id
 
-    draft = await _get_pending_draft(db_path, config.account_id)
+    draft = await get_pending_draft(db_path, config.account_id)
     if draft is None:
         await update.message.reply_text("No pending draft to approve.")
         return
@@ -636,7 +640,7 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
 
-    draft = await _get_pending_draft(db_path, config.account_id)
+    draft = await get_pending_draft(db_path, config.account_id)
     if draft is None:
         await update.message.reply_text("No pending draft to skip.")
         return
@@ -676,7 +680,7 @@ async def cmd_skip_today(
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
 
-    draft = await _get_pending_draft(db_path, config.account_id)
+    draft = await get_pending_draft(db_path, config.account_id)
     if draft is not None:
         # Cancel auto-publish timer
         task_key = _auto_publish_task_key(config.account_id)
@@ -716,7 +720,7 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     new_caption = " ".join(context.args)
 
-    draft = await _get_pending_draft(db_path, config.account_id)
+    draft = await get_pending_draft(db_path, config.account_id)
     if draft is None:
         await update.message.reply_text("No pending draft to edit.")
         return
@@ -749,7 +753,7 @@ async def cmd_regenerate(
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
 
-    draft = await _get_pending_draft(db_path, config.account_id)
+    draft = await get_pending_draft(db_path, config.account_id)
     if draft is not None:
         # Cancel auto-publish timer
         task_key = _auto_publish_task_key(config.account_id)
@@ -830,7 +834,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lines.append("")
 
     # Pending draft
-    draft = await _get_pending_draft(db_path, config.account_id)
+    draft = await get_pending_draft(db_path, config.account_id)
     if draft:
         lines.append(f"Pending draft: #{draft['id']} (publish_at: {draft['publish_at']})")
     else:
@@ -1017,7 +1021,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id
 
     # Check for existing pending draft
-    pending = await _get_pending_draft(db_path, config.account_id)
+    pending = await get_pending_draft(db_path, config.account_id)
     if pending is not None:
         await update.message.reply_text(
             "A draft is already pending. Use /approve, /skip, or wait for auto-publish."
@@ -1100,7 +1104,7 @@ async def _resume_overdue_drafts(application: Application) -> None:
         config: AccountConfig = acct_ctx["config"]
         db_path: str = acct_ctx["db_path"]
 
-        draft = await _get_pending_draft(db_path, config.account_id)
+        draft = await get_pending_draft(db_path, config.account_id)
         if draft is None:
             logger.info("No pending drafts to resume for account '%s'.", config.account_id)
             continue

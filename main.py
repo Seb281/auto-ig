@@ -186,7 +186,7 @@ async def main() -> None:
     )
     from agents.orchestrator import run_pipeline
     from agents import PipelineResult
-    from control.telegram_bot import _get_pending_draft
+    from control.telegram_bot import get_pending_draft
 
     scheduler = create_scheduler()
 
@@ -212,7 +212,7 @@ async def main() -> None:
             pipeline_key = f"pipeline_running_{_config.account_id}"
 
             # Guard: skip if a draft is already pending
-            pending = await _get_pending_draft(_db_path, _config.account_id)
+            pending = await get_pending_draft(_db_path, _config.account_id)
             if pending is not None:
                 logger.info(
                     "Scheduled run for '%s' skipped — a draft is already pending (id=%d).",

@@ -1,5 +1,6 @@
 """Image processing utilities — resize/crop for Instagram and perceptual hashing."""
 
+import asyncio
 import logging
 import os
 import shutil
@@ -15,32 +16,20 @@ INSTAGRAM_SQUARE = (1080, 1080)
 INSTAGRAM_PORTRAIT = (1080, 1350)
 
 
-async def resize_for_instagram(
-    image_path: str,
-    output_path: str,
-    aspect: str = "square",
-) -> str:
-    """Resize and crop an image to Instagram dimensions, saved as JPEG."""
-    if aspect == "portrait":
-        target_size = INSTAGRAM_PORTRAIT
-    else:
-        target_size = INSTAGRAM_SQUARE
-
+def _resize_sync(image_path: str, output_path: str, target_size: tuple[int, int]) -> str:
+    """Synchronous image resize — meant to be called via asyncio.to_thread."""
     try:
         img = Image.open(image_path)
-        img.load()  # Force full read to detect corrupt files early
+        img.load()
     except Exception as exc:
         raise ValueError(f"Cannot open image {image_path}: {exc}") from exc
 
-    # Convert RGBA/P/LA to RGB for JPEG output
     if img.mode in ("RGBA", "P", "LA"):
         img = img.convert("RGB")
     elif img.mode != "RGB":
         img = img.convert("RGB")
 
-    # Center-crop and resize to target dimensions
     img = ImageOps.fit(img, target_size, method=Image.LANCZOS)
-
     img.save(output_path, format="JPEG", quality=95)
     logger.info(
         "Resized %s -> %s (%dx%d)",
@@ -50,6 +39,16 @@ async def resize_for_instagram(
         target_size[1],
     )
     return output_path
+
+
+async def resize_for_instagram(
+    image_path: str,
+    output_path: str,
+    aspect: str = "square",
+) -> str:
+    """Resize and crop an image to Instagram dimensions, saved as JPEG."""
+    target_size = INSTAGRAM_PORTRAIT if aspect == "portrait" else INSTAGRAM_SQUARE
+    return await asyncio.to_thread(_resize_sync, image_path, output_path, target_size)
 
 
 def compute_phash(image_path: str) -> str:
@@ -102,6 +101,6 @@ async def is_duplicate_image(
 
 async def copy_user_photo(source_path: str, dest_path: str) -> str:
     """Copy a user-supplied photo to the media directory."""
-    shutil.copy2(source_path, dest_path)
+    await asyncio.to_thread(shutil.copy2, source_path, dest_path)
     logger.info("Copied user photo to %s", dest_path)
     return dest_path

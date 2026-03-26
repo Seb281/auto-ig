@@ -176,6 +176,7 @@ async def init_db(db_path: str) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id TEXT NOT NULL,
                 image_path TEXT NOT NULL,
+                image_phash TEXT NOT NULL DEFAULT '',
                 caption TEXT NOT NULL,
                 hashtags TEXT NOT NULL,
                 alt_text TEXT NOT NULL,
