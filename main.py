@@ -1,4 +1,9 @@
-"""Entry point for auto-ig — autonomous Instagram post creator."""
+"""Entry point for auto-ig — autonomous Instagram post creator.
+
+Supports running one or more accounts simultaneously. Each account gets
+its own scheduler job and pipeline lock; all accounts share a single
+Telegram bot Application (they must use the same bot token).
+"""
 
 import argparse
 import asyncio
@@ -16,7 +21,7 @@ from utils.config_loader import (
     validate_env_vars,
 )
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 logger = logging.getLogger("auto-ig")
 
@@ -28,8 +33,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--account",
-        default="veggie_alternatives",
-        help="Account ID matching a directory under accounts/ (default: veggie_alternatives)",
+        dest="accounts",
+        action="append",
+        default=None,
+        help=(
+            "Account ID matching a directory under accounts/. "
+            "Can be specified multiple times for multi-account mode "
+            "(default: veggie_alternatives)."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -89,32 +100,49 @@ async def main() -> None:
 
     load_dotenv()
 
-    # Load account config
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(base_dir, "accounts", args.account, "config.yaml")
 
-    try:
-        config: AccountConfig = load_account_config(config_path)
-    except FileNotFoundError:
-        logger.error("Config file not found: %s", config_path)
-        sys.exit(1)
-    except ValueError as exc:
-        logger.error("Invalid config: %s", exc)
-        sys.exit(1)
+    # Resolve account list — default to veggie_alternatives if none specified
+    account_ids: list[str] = args.accounts if args.accounts else ["veggie_alternatives"]
+    logger.info("Accounts to load: %s", ", ".join(account_ids))
 
-    # Validate environment variables
-    try:
-        validate_env_vars(config)
-    except ValueError as exc:
-        logger.error("%s", exc)
-        sys.exit(1)
+    # ------------------------------------------------------------------
+    # Load and validate all account configs
+    # ------------------------------------------------------------------
+    loaded_accounts: list[tuple[AccountConfig, str]] = []  # (config, db_path)
 
-    # Initialize database
-    db_path = os.path.join(base_dir, "accounts", args.account, "post_history.db")
-    try:
-        await init_db(db_path)
-    except Exception as exc:
-        logger.error("Database initialization failed: %s", exc)
+    for account_id in account_ids:
+        config_path = os.path.join(base_dir, "accounts", account_id, "config.yaml")
+
+        try:
+            config: AccountConfig = load_account_config(config_path)
+        except FileNotFoundError:
+            logger.error("Config file not found: %s — skipping account '%s'.", config_path, account_id)
+            continue
+        except ValueError as exc:
+            logger.error("Invalid config for '%s': %s — skipping.", account_id, exc)
+            continue
+
+        # Validate environment variables
+        try:
+            validate_env_vars(config)
+        except ValueError as exc:
+            logger.error("Env var validation failed for '%s': %s — skipping.", account_id, exc)
+            continue
+
+        # Initialize database
+        db_path = os.path.join(base_dir, "accounts", account_id, "post_history.db")
+        try:
+            await init_db(db_path)
+        except Exception as exc:
+            logger.error("DB init failed for '%s': %s — skipping.", account_id, exc)
+            continue
+
+        loaded_accounts.append((config, db_path))
+        logger.info("Account '%s' loaded successfully.", account_id)
+
+    if not loaded_accounts:
+        logger.error("No valid accounts loaded. Exiting.")
         sys.exit(1)
 
     # Ensure storage/media/ directory exists
@@ -124,9 +152,15 @@ async def main() -> None:
     if args.dry_run:
         logger.info("Dry-run mode enabled — publishing will be skipped.")
 
-    logger.info("auto-ig started for account '%s'", config.account_id)
+    logger.info(
+        "Loaded %d account(s): %s",
+        len(loaded_accounts),
+        ", ".join(c.account_id for c, _ in loaded_accounts),
+    )
 
-    # Build and start the Telegram bot
+    # ------------------------------------------------------------------
+    # Build Telegram bot with all accounts
+    # ------------------------------------------------------------------
     from control.telegram_bot import (
         build_application,
         send_draft_for_review,
@@ -134,103 +168,137 @@ async def main() -> None:
         send_pipeline_error,
     )
 
-    application = build_application(
-        config=config,
-        db_path=db_path,
-        dry_run=args.dry_run,
-    )
+    accounts_tuples = [
+        (config, db_path, args.dry_run)
+        for config, db_path in loaded_accounts
+    ]
 
-    # --- Scheduler setup ---
+    application = build_application(accounts=accounts_tuples)
+
+    # ------------------------------------------------------------------
+    # Scheduler setup — one shared scheduler, per-account jobs
+    # ------------------------------------------------------------------
     from publisher.scheduler import (
         create_scheduler,
         load_or_init_schedule,
+        pipeline_job_id,
         schedule_pipeline_job,
     )
     from agents.orchestrator import run_pipeline
     from agents import PipelineResult
     from control.telegram_bot import _get_pending_draft
 
-    sched_config = await load_or_init_schedule(db_path, config)
     scheduler = create_scheduler()
 
-    # Lock to protect the pipeline_running check-then-set across coroutines
-    pipeline_lock = asyncio.Lock()
+    # Per-account pipeline locks (prevent concurrent runs for the same account)
+    pipeline_locks: dict[str, asyncio.Lock] = {}
 
-    # Define the scheduled pipeline run function
-    async def scheduled_run() -> None:
-        """Run the pipeline on a schedule — called by APScheduler."""
-        bot_data = application.bot_data
+    for config, db_path in loaded_accounts:
+        sched_config = await load_or_init_schedule(db_path, config)
+        pipeline_locks[config.account_id] = asyncio.Lock()
+
         chat_id = int(os.getenv(config.telegram_chat_id_env, "0"))
 
-        # Guard: skip if a draft is already pending
-        pending = await _get_pending_draft(db_path, config.account_id)
-        if pending is not None:
-            logger.info(
-                "Scheduled run skipped — a draft is already pending (id=%d).",
-                pending["id"],
-            )
-            return
+        # Create a per-account scheduled_run closure
+        # Use default args to capture current loop variables
+        async def make_scheduled_run(
+            _config: AccountConfig = config,
+            _db_path: str = db_path,
+            _chat_id: int = chat_id,
+        ) -> None:
+            """Run the pipeline on a schedule for a specific account."""
+            bot_data = application.bot_data
+            acct_lock = pipeline_locks[_config.account_id]
+            pipeline_key = f"pipeline_running_{_config.account_id}"
 
-        # Guard: atomically check-then-set pipeline_running
-        async with pipeline_lock:
-            if bot_data.get("pipeline_running"):
-                logger.info("Scheduled run skipped — pipeline already running.")
-                return
-            bot_data["pipeline_running"] = True
-
-        logger.info("Scheduled pipeline run starting...")
-
-        try:
-            user_hint = bot_data.pop("suggested_topic", None)
-
-            result: PipelineResult = await run_pipeline(
-                config=config,
-                db_path=db_path,
-                user_hint=user_hint,
-                dry_run=args.dry_run,
-            )
-
-            if result.error:
-                await send_pipeline_error(application, chat_id, result.error)
+            # Guard: skip if a draft is already pending
+            pending = await _get_pending_draft(_db_path, _config.account_id)
+            if pending is not None:
+                logger.info(
+                    "Scheduled run for '%s' skipped — a draft is already pending (id=%d).",
+                    _config.account_id,
+                    pending["id"],
+                )
                 return
 
-            if result.success:
-                await send_draft_for_review(
-                    application, chat_id, result, bot_data
-                )
-            elif result.review and result.review.status == "FAIL":
-                await send_draft_for_review(
-                    application, chat_id, result, bot_data
-                )
-                await send_escalation(application, chat_id, result)
-            else:
-                await application.bot.send_message(
-                    chat_id=chat_id,
-                    text="Scheduled pipeline completed but produced no publishable result.",
-                )
+            # Guard: atomically check-then-set pipeline_running
+            async with acct_lock:
+                if bot_data.get(pipeline_key):
+                    logger.info(
+                        "Scheduled run for '%s' skipped — pipeline already running.",
+                        _config.account_id,
+                    )
+                    return
+                bot_data[pipeline_key] = True
 
-        except Exception as exc:
-            logger.error("Scheduled pipeline run failed: %s", exc, exc_info=True)
+            logger.info("Scheduled pipeline run starting for '%s'...", _config.account_id)
+
             try:
-                await send_pipeline_error(application, chat_id, str(exc))
-            except Exception:
-                logger.error("Failed to send error notification.", exc_info=True)
+                suggest_key = f"suggested_topic_{_config.account_id}"
+                user_hint = bot_data.pop(suggest_key, None)
 
-        finally:
-            bot_data["pipeline_running"] = False
+                result: PipelineResult = await run_pipeline(
+                    config=_config,
+                    db_path=_db_path,
+                    user_hint=user_hint,
+                    dry_run=args.dry_run,
+                )
 
-    # Schedule the pipeline job
-    schedule_pipeline_job(
-        scheduler=scheduler,
-        job_func=scheduled_run,
-        frequency=sched_config["frequency"],
-        preferred_time=sched_config["preferred_time"],
-        timezone_str=sched_config["timezone"],
-    )
+                if result.error:
+                    await send_pipeline_error(application, _chat_id, result.error)
+                    return
 
-    # Store scheduler and the run function in bot_data so Telegram commands can access them
+                if result.success:
+                    await send_draft_for_review(
+                        application, _chat_id, result, bot_data
+                    )
+                elif result.review and result.review.status == "FAIL":
+                    await send_draft_for_review(
+                        application, _chat_id, result, bot_data
+                    )
+                    await send_escalation(application, _chat_id, result)
+                else:
+                    await application.bot.send_message(
+                        chat_id=_chat_id,
+                        text=f"[{_config.account_id}] Scheduled pipeline completed but produced no publishable result.",
+                    )
+
+            except Exception as exc:
+                logger.error(
+                    "Scheduled pipeline run failed for '%s': %s",
+                    _config.account_id,
+                    exc,
+                    exc_info=True,
+                )
+                try:
+                    await send_pipeline_error(application, _chat_id, str(exc))
+                except Exception:
+                    logger.error("Failed to send error notification.", exc_info=True)
+
+            finally:
+                bot_data[pipeline_key] = False
+
+        # Schedule the per-account job
+        schedule_pipeline_job(
+            scheduler=scheduler,
+            job_func=make_scheduled_run,
+            frequency=sched_config["frequency"],
+            preferred_time=sched_config["preferred_time"],
+            timezone_str=sched_config["timezone"],
+            account_id=config.account_id,
+        )
+
+        # Store the run function in bot_data so Telegram commands (setfrequency) can reschedule
+        run_func_key = f"scheduled_run_func_{config.account_id}"
+        application.bot_data[run_func_key] = make_scheduled_run
+
+        # If schedule is paused in DB, pause the job immediately after scheduler starts
+        if sched_config.get("paused"):
+            # We'll pause after scheduler.start() below
+            application.bot_data[f"_paused_on_start_{config.account_id}"] = True
+
+    # Store scheduler in bot_data so Telegram commands can access it
     application.bot_data["scheduler"] = scheduler
-    application.bot_data["scheduled_run_func"] = scheduled_run
 
     logger.info("Starting Telegram bot (polling)...")
 
@@ -240,10 +308,18 @@ async def main() -> None:
     scheduler.start()
     logger.info("APScheduler started.")
 
-    # If schedule is paused in DB, pause the scheduler immediately
-    if sched_config.get("paused"):
-        scheduler.pause()
-        logger.info("Scheduler started in paused state (paused=1 in DB).")
+    # Pause any accounts that were marked as paused in the DB
+    for config, db_path in loaded_accounts:
+        paused_key = f"_paused_on_start_{config.account_id}"
+        if application.bot_data.pop(paused_key, False):
+            job_id = pipeline_job_id(config.account_id)
+            job = scheduler.get_job(job_id)
+            if job is not None:
+                job.pause()
+                logger.info(
+                    "Scheduler job '%s' started in paused state (paused=1 in DB).",
+                    job_id,
+                )
 
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)

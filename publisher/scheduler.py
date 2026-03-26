@@ -3,6 +3,9 @@
 Wraps AsyncIOScheduler to provide frequency-based automatic pipeline runs.
 Schedule configuration is persisted in the schedule_config SQLite table and
 can be changed at runtime via the Telegram /setfrequency command.
+
+Supports multi-account: each account gets its own scheduler job with a unique
+job ID derived from the account_id.
 """
 
 import logging
@@ -22,8 +25,16 @@ from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
 
-# Canonical job ID for the pipeline run
-PIPELINE_JOB_ID = "pipeline_run"
+# Default job ID prefix for pipeline runs
+_PIPELINE_JOB_PREFIX = "pipeline_run"
+
+# Legacy constant kept for backwards compatibility
+PIPELINE_JOB_ID = _PIPELINE_JOB_PREFIX
+
+
+def pipeline_job_id(account_id: str) -> str:
+    """Return the unique scheduler job ID for a given account."""
+    return f"{_PIPELINE_JOB_PREFIX}_{account_id}"
 
 
 def create_scheduler() -> AsyncIOScheduler:
@@ -158,29 +169,33 @@ def schedule_pipeline_job(
     preferred_time: str,
     timezone_str: str,
     job_id: str = PIPELINE_JOB_ID,
+    account_id: str | None = None,
 ) -> None:
     """Remove any existing pipeline job and add a new one with the given schedule."""
+    # Use per-account job ID if account_id is provided
+    effective_job_id = pipeline_job_id(account_id) if account_id else job_id
+
     trigger = frequency_to_trigger(frequency, preferred_time, timezone_str)
 
     # Remove existing job if present
-    existing = scheduler.get_job(job_id)
+    existing = scheduler.get_job(effective_job_id)
     if existing is not None:
-        scheduler.remove_job(job_id)
-        logger.info("Removed existing scheduler job '%s'.", job_id)
+        scheduler.remove_job(effective_job_id)
+        logger.info("Removed existing scheduler job '%s'.", effective_job_id)
 
     scheduler.add_job(
         job_func,
         trigger=trigger,
-        id=job_id,
-        name="auto-ig pipeline run",
+        id=effective_job_id,
+        name=f"auto-ig pipeline run ({account_id or 'default'})",
         replace_existing=True,
         misfire_grace_time=3600,  # 1 hour grace for misfires
     )
 
-    next_run = get_next_run_time(scheduler, job_id)
+    next_run = get_next_run_time(scheduler, effective_job_id)
     logger.info(
         "Scheduled pipeline job '%s': frequency=%s, time=%s, tz=%s, next_run=%s",
-        job_id,
+        effective_job_id,
         frequency,
         preferred_time,
         timezone_str,
