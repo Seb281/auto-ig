@@ -1,0 +1,107 @@
+"""Image processing utilities — resize/crop for Instagram and perceptual hashing."""
+
+import logging
+import os
+import shutil
+
+import aiosqlite
+import imagehash
+from PIL import Image, ImageOps
+
+logger = logging.getLogger(__name__)
+
+# Instagram target dimensions
+INSTAGRAM_SQUARE = (1080, 1080)
+INSTAGRAM_PORTRAIT = (1080, 1350)
+
+
+async def resize_for_instagram(
+    image_path: str,
+    output_path: str,
+    aspect: str = "square",
+) -> str:
+    """Resize and crop an image to Instagram dimensions, saved as JPEG."""
+    if aspect == "portrait":
+        target_size = INSTAGRAM_PORTRAIT
+    else:
+        target_size = INSTAGRAM_SQUARE
+
+    try:
+        img = Image.open(image_path)
+        img.load()  # Force full read to detect corrupt files early
+    except Exception as exc:
+        raise ValueError(f"Cannot open image {image_path}: {exc}") from exc
+
+    # Convert RGBA/P/LA to RGB for JPEG output
+    if img.mode in ("RGBA", "P", "LA"):
+        img = img.convert("RGB")
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    # Center-crop and resize to target dimensions
+    img = ImageOps.fit(img, target_size, method=Image.LANCZOS)
+
+    img.save(output_path, format="JPEG", quality=95)
+    logger.info(
+        "Resized %s -> %s (%dx%d)",
+        os.path.basename(image_path),
+        os.path.basename(output_path),
+        target_size[0],
+        target_size[1],
+    )
+    return output_path
+
+
+def compute_phash(image_path: str) -> str:
+    """Compute the perceptual hash of an image file."""
+    try:
+        img = Image.open(image_path)
+        img.load()
+    except Exception as exc:
+        raise ValueError(f"Cannot open image for hashing {image_path}: {exc}") from exc
+
+    phash_value = imagehash.phash(img)
+    return str(phash_value)
+
+
+async def is_duplicate_image(
+    phash: str,
+    db_path: str,
+    account_id: str,
+    threshold: int = 6,
+) -> bool:
+    """Check if a perceptual hash is too similar to any recent post image."""
+    current_hash = imagehash.hex_to_hash(phash)
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT image_phash FROM post_history WHERE account_id = ?",
+            (account_id,),
+        )
+        rows = await cursor.fetchall()
+
+    for (stored_phash_str,) in rows:
+        try:
+            stored_hash = imagehash.hex_to_hash(stored_phash_str)
+        except Exception:
+            logger.warning("Skipping invalid stored phash: %s", stored_phash_str)
+            continue
+
+        distance = current_hash - stored_hash
+        if distance <= threshold:
+            logger.info(
+                "Duplicate detected: distance=%d (threshold=%d), stored=%s",
+                distance,
+                threshold,
+                stored_phash_str,
+            )
+            return True
+
+    return False
+
+
+async def copy_user_photo(source_path: str, dest_path: str) -> str:
+    """Copy a user-supplied photo to the media directory."""
+    shutil.copy2(source_path, dest_path)
+    logger.info("Copied user photo to %s", dest_path)
+    return dest_path
