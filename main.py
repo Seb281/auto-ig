@@ -89,9 +89,53 @@ async def main() -> None:
 
     logger.info("auto-ig started for account '%s'", config.account_id)
 
-    # TODO: Milestone 6 — Wire up Telegram bot (Application + ConversationHandler)
+    # Build and start the Telegram bot
+    from control.telegram_bot import build_application
+
+    application = build_application(
+        config=config,
+        db_path=db_path,
+        dry_run=args.dry_run,
+    )
+
+    logger.info("Starting Telegram bot (polling)...")
+
     # TODO: Milestone 7 — Wire up AsyncIOScheduler with frequency from schedule_config
-    # TODO: Start the event loop with both scheduler and Telegram bot running concurrently
+    # The scheduler should be stored in application.bot_data["scheduler"] so the
+    # /pause and /resume commands can control it.
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+
+    logger.info("Telegram bot is running. Press Ctrl+C to stop.")
+
+    # Keep the bot running until interrupted
+    stop_event = asyncio.Event()
+
+    def _signal_handler() -> None:
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig_name in ("SIGINT", "SIGTERM"):
+        try:
+            loop.add_signal_handler(
+                getattr(__import__("signal"), sig_name), _signal_handler
+            )
+        except (NotImplementedError, AttributeError):
+            # Signal handling not available on some platforms (e.g. Windows)
+            pass
+
+    try:
+        await stop_event.wait()
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        logger.info("Shutting down Telegram bot...")
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+        logger.info("Telegram bot stopped.")
 
 
 if __name__ == "__main__":
