@@ -25,12 +25,19 @@ from telegram.ext import (
 
 from agents import PipelineResult, PlannerBrief
 from agents.orchestrator import run_pipeline
+from publisher.scheduler import get_next_run_time, schedule_pipeline_job
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
 
 # Valid frequency values
 _VALID_FREQUENCIES = {"1d", "2d", "3x", "2x", "1x"}
+
+
+def _read_file_bytes(path: str) -> bytes:
+    """Read a file's contents as bytes (meant to be called via asyncio.to_thread)."""
+    with open(path, "rb") as f:
+        return f.read()
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +383,7 @@ async def send_draft_for_review(
     draft_image_path = os.path.join(
         media_dir, f"draft_{os.path.basename(result.image.local_path)}"
     )
-    shutil.copy2(result.image.local_path, draft_image_path)
+    await asyncio.to_thread(shutil.copy2, result.image.local_path, draft_image_path)
 
     # Save to pending_drafts
     draft_id = await _save_pending_draft(
@@ -392,12 +399,12 @@ async def send_draft_for_review(
 
     # Send image
     try:
-        with open(draft_image_path, "rb") as photo_file:
-            await application.bot.send_photo(
-                chat_id=chat_id,
-                photo=photo_file,
-                caption=f"Draft #{draft_id} ready for review",
-            )
+        photo_bytes = await asyncio.to_thread(_read_file_bytes, draft_image_path)
+        await application.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_bytes,
+            caption=f"Draft #{draft_id} ready for review",
+        )
     except Exception as exc:
         logger.error("Failed to send draft photo: %s", exc)
         await application.bot.send_message(
@@ -726,6 +733,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines.append(f"Preferred time: {config.preferred_time} (default)")
         lines.append("Paused: No")
 
+    # Next scheduled run
+    scheduler = bot_data.get("scheduler")
+    if scheduler is not None:
+        next_run = get_next_run_time(scheduler)
+        if next_run:
+            lines.append(f"Next run: {next_run}")
+        else:
+            lines.append("Next run: N/A (paused or no job)")
+    else:
+        lines.append("Next run: scheduler not active")
+
     lines.append("")
 
     # Pending draft
@@ -787,6 +805,31 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("Scheduler resumed.")
 
 
+
+async def _reschedule_from_db(
+    bot_data: dict, db_path: str, config: AccountConfig
+) -> None:
+    """Re-read schedule_config from DB and reschedule the APScheduler job."""
+    scheduler = bot_data.get('scheduler')
+    job_func = bot_data.get('scheduled_run_func')
+    if scheduler is None or job_func is None:
+        logger.warning('Scheduler not wired up — cannot reschedule.')
+        return
+
+    sched = await _get_schedule_config(db_path, config.account_id)
+    if sched is None:
+        return
+
+    schedule_pipeline_job(
+        scheduler=scheduler,
+        job_func=job_func,
+        frequency=sched['frequency'],
+        preferred_time=sched['preferred_time'],
+        timezone_str=sched['timezone'],
+    )
+    logger.info('Rescheduled pipeline job after /setfrequency change.')
+
+
 async def cmd_setfrequency(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -817,6 +860,8 @@ async def cmd_setfrequency(
             await _upsert_schedule_config(
                 db_path, config.account_id, preferred_time=formatted_time
             )
+            # Reschedule the APScheduler job with the new time
+            await _reschedule_from_db(bot_data, db_path, config)
             await update.message.reply_text(
                 f"Posting time changed to {formatted_time}."
             )
@@ -835,6 +880,8 @@ async def cmd_setfrequency(
         return
 
     await _upsert_schedule_config(db_path, config.account_id, frequency=value)
+    # Reschedule the APScheduler job with the new frequency
+    await _reschedule_from_db(bot_data, db_path, config)
     await update.message.reply_text(f"Posting frequency changed to {value}.")
 
 

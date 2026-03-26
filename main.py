@@ -46,7 +46,7 @@ def setup_logging() -> None:
 
 
 async def main() -> None:
-    """Initialize config, database, and start the application."""
+    """Initialize config, database, scheduler, and start the application."""
     setup_logging()
     args = parse_args()
 
@@ -90,7 +90,12 @@ async def main() -> None:
     logger.info("auto-ig started for account '%s'", config.account_id)
 
     # Build and start the Telegram bot
-    from control.telegram_bot import build_application
+    from control.telegram_bot import (
+        build_application,
+        send_draft_for_review,
+        send_escalation,
+        send_pipeline_error,
+    )
 
     application = build_application(
         config=config,
@@ -98,13 +103,111 @@ async def main() -> None:
         dry_run=args.dry_run,
     )
 
+    # --- Scheduler setup ---
+    from publisher.scheduler import (
+        create_scheduler,
+        load_or_init_schedule,
+        schedule_pipeline_job,
+    )
+    from agents.orchestrator import run_pipeline
+    from agents import PipelineResult
+    from control.telegram_bot import _get_pending_draft
+
+    sched_config = await load_or_init_schedule(db_path, config)
+    scheduler = create_scheduler()
+
+    # Lock to protect the pipeline_running check-then-set across coroutines
+    pipeline_lock = asyncio.Lock()
+
+    # Define the scheduled pipeline run function
+    async def scheduled_run() -> None:
+        """Run the pipeline on a schedule — called by APScheduler."""
+        bot_data = application.bot_data
+        chat_id = int(os.getenv(config.telegram_chat_id_env, "0"))
+
+        # Guard: skip if a draft is already pending
+        pending = await _get_pending_draft(db_path, config.account_id)
+        if pending is not None:
+            logger.info(
+                "Scheduled run skipped — a draft is already pending (id=%d).",
+                pending["id"],
+            )
+            return
+
+        # Guard: atomically check-then-set pipeline_running
+        async with pipeline_lock:
+            if bot_data.get("pipeline_running"):
+                logger.info("Scheduled run skipped — pipeline already running.")
+                return
+            bot_data["pipeline_running"] = True
+
+        logger.info("Scheduled pipeline run starting...")
+
+        try:
+            user_hint = bot_data.pop("suggested_topic", None)
+
+            result: PipelineResult = await run_pipeline(
+                config=config,
+                db_path=db_path,
+                user_hint=user_hint,
+                dry_run=args.dry_run,
+            )
+
+            if result.error:
+                await send_pipeline_error(application, chat_id, result.error)
+                return
+
+            if result.success:
+                await send_draft_for_review(
+                    application, chat_id, result, bot_data
+                )
+            elif result.review and result.review.status == "FAIL":
+                await send_draft_for_review(
+                    application, chat_id, result, bot_data
+                )
+                await send_escalation(application, chat_id, result)
+            else:
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text="Scheduled pipeline completed but produced no publishable result.",
+                )
+
+        except Exception as exc:
+            logger.error("Scheduled pipeline run failed: %s", exc, exc_info=True)
+            try:
+                await send_pipeline_error(application, chat_id, str(exc))
+            except Exception:
+                logger.error("Failed to send error notification.", exc_info=True)
+
+        finally:
+            bot_data["pipeline_running"] = False
+
+    # Schedule the pipeline job
+    schedule_pipeline_job(
+        scheduler=scheduler,
+        job_func=scheduled_run,
+        frequency=sched_config["frequency"],
+        preferred_time=sched_config["preferred_time"],
+        timezone_str=sched_config["timezone"],
+    )
+
+    # Store scheduler and the run function in bot_data so Telegram commands can access them
+    application.bot_data["scheduler"] = scheduler
+    application.bot_data["scheduled_run_func"] = scheduled_run
+
     logger.info("Starting Telegram bot (polling)...")
 
-    # TODO: Milestone 7 — Wire up AsyncIOScheduler with frequency from schedule_config
-    # The scheduler should be stored in application.bot_data["scheduler"] so the
-    # /pause and /resume commands can control it.
-
     await application.initialize()
+
+    # Start the scheduler (shares the asyncio event loop)
+    scheduler.start()
+    logger.info("APScheduler started.")
+
+    # If schedule is paused in DB, pause the scheduler immediately
+    if sched_config.get("paused"):
+        scheduler.pause()
+        logger.info("Scheduler started in paused state (paused=1 in DB).")
+
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
 
@@ -131,7 +234,13 @@ async def main() -> None:
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
-        logger.info("Shutting down Telegram bot...")
+        logger.info("Shutting down...")
+
+        # Shut down the scheduler
+        scheduler.shutdown(wait=False)
+        logger.info("APScheduler shut down.")
+
+        # Shut down the Telegram bot
         await application.updater.stop()
         await application.stop()
         await application.shutdown()
