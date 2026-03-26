@@ -8,6 +8,7 @@ from agents.caption_writer import generate_caption
 from agents.content_planner import generate_brief
 from agents.image_sourcing import source_image
 from agents.reviewer import review_post
+from publisher.instagram import publish_post, save_post_record
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ async def run_pipeline(
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     media_dir = os.path.join(base_dir, "storage", "media")
 
+    image: ImageResult | None = None
     try:
         # Step 1: Generate or synthesize a brief
         if user_photo_path is not None:
@@ -50,7 +52,7 @@ async def run_pipeline(
 
         # Step 2: Source an image
         logger.info("Sourcing image...")
-        image: ImageResult = await source_image(
+        image = await source_image(
             config=config,
             brief=brief,
             db_path=db_path,
@@ -117,12 +119,41 @@ async def run_pipeline(
                 logger.info("No retry_type specified — regenerating caption.")
                 caption = await generate_caption(config, brief)
 
-        # TODO: Milestone 5 — Publisher (temp server + Meta Graph API)
+        # Step 5: Publish (if review passed)
+        media_id: str | None = None
+        review_passed = review is not None and review.status == "PASS"
+
+        if review_passed:
+            full_caption_text = (
+                caption.caption
+                + "\n\n"
+                + " ".join(f"#{h}" for h in caption.hashtags)
+            )
+
+            if dry_run:
+                logger.info("[DRY RUN] Skipping publish step.")
+            else:
+                media_id = await publish_post(
+                    config, image.local_path, full_caption_text, caption.alt_text
+                )
+
+            # Record to post_history on successful publish or dry-run pass
+            await save_post_record(
+                db_path=db_path,
+                account_id=config.account_id,
+                topic=brief.topic,
+                content_pillar=brief.content_pillar,
+                image_phash=image.phash,
+                caption=full_caption_text,
+                instagram_media_id=media_id,
+            )
+        else:
+            logger.warning("Reviewer did not pass — skipping publish.")
 
         logger.info("Pipeline complete.")
         return PipelineResult(
-            success=review.status == "PASS" if review else False,
-            post_id=None,
+            success=review_passed,
+            post_id=media_id,
             brief=brief,
             image=image,
             caption=caption,
@@ -143,3 +174,9 @@ async def run_pipeline(
             error=str(exc),
             skipped=False,
         )
+
+    finally:
+        # Always clean up temporary image files
+        if image is not None and image.local_path and os.path.exists(image.local_path):
+            os.remove(image.local_path)
+            logger.info("Cleaned up image: %s", image.local_path)
