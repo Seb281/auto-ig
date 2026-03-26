@@ -3,13 +3,17 @@
 import logging
 import os
 
-from agents import CaptionResult, ImageResult, PipelineResult, PlannerBrief
+from agents import CaptionResult, ImageResult, PipelineResult, PlannerBrief, ReviewResult
 from agents.caption_writer import generate_caption
 from agents.content_planner import generate_brief
 from agents.image_sourcing import source_image
+from agents.reviewer import review_post
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of reviewer retry attempts before escalation
+MAX_REVIEW_RETRIES = 2
 
 
 async def run_pipeline(
@@ -64,17 +68,65 @@ async def run_pipeline(
         logger.info("Generating caption...")
         caption: CaptionResult = await generate_caption(config, brief)
 
-        # TODO: Milestone 4 — Reviewer after caption generation
+        # Step 4: Reviewer with retry logic (up to MAX_REVIEW_RETRIES)
+        review: ReviewResult | None = None
+        for attempt in range(1, MAX_REVIEW_RETRIES + 1):
+            logger.info("Running reviewer (attempt %d/%d)...", attempt, MAX_REVIEW_RETRIES)
+            review = await review_post(config, brief, image, caption, db_path)
+
+            if review.status == "PASS":
+                logger.info("Reviewer PASSED on attempt %d.", attempt)
+                break
+
+            logger.warning(
+                "Reviewer FAILED on attempt %d: %s (retry_type=%s)",
+                attempt,
+                "; ".join(review.reasons),
+                review.retry_type,
+            )
+
+            # Don't retry after the last attempt
+            if attempt >= MAX_REVIEW_RETRIES:
+                logger.warning(
+                    "Reviewer failed after %d attempts — escalating.",
+                    MAX_REVIEW_RETRIES,
+                )
+                break
+
+            # Retry the appropriate upstream step
+            if review.retry_type == "image":
+                logger.info("Re-sourcing image for retry...")
+                image = await source_image(
+                    config=config,
+                    brief=brief,
+                    db_path=db_path,
+                    media_dir=media_dir,
+                    user_photo_path=user_photo_path,
+                )
+                logger.info(
+                    "Image re-sourced — source: %s, score: %.2f",
+                    image.source,
+                    image.score,
+                )
+            elif review.retry_type == "caption":
+                logger.info("Regenerating caption for retry...")
+                caption = await generate_caption(config, brief)
+                logger.info("Caption regenerated.")
+            else:
+                # No retry_type specified — retry caption as default
+                logger.info("No retry_type specified — regenerating caption.")
+                caption = await generate_caption(config, brief)
+
         # TODO: Milestone 5 — Publisher (temp server + Meta Graph API)
 
         logger.info("Pipeline complete.")
         return PipelineResult(
-            success=True,
+            success=review.status == "PASS" if review else False,
             post_id=None,
             brief=brief,
             image=image,
             caption=caption,
-            review=None,
+            review=review,
             error=None,
             skipped=False,
         )
