@@ -196,6 +196,7 @@ async def _upsert_schedule_config(
     frequency: str | None = None,
     preferred_time: str | None = None,
     paused: int | None = None,
+    timezone: str = "UTC",
 ) -> None:
     """Insert or update the schedule_config for an account."""
     async with aiosqlite.connect(db_path) as db:
@@ -212,12 +213,13 @@ async def _upsert_schedule_config(
                 """
                 INSERT INTO schedule_config
                     (account_id, frequency, preferred_time, timezone, paused)
-                VALUES (?, ?, ?, 'America/New_York', ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
                     frequency or "1d",
                     preferred_time or "08:00",
+                    timezone,
                     paused if paused is not None else 0,
                 ),
             )
@@ -878,7 +880,7 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
 
-    await _upsert_schedule_config(db_path, config.account_id, paused=1)
+    await _upsert_schedule_config(db_path, config.account_id, paused=1, timezone=config.timezone)
 
     # Pause the specific account's scheduler job
     scheduler = bot_data.get("scheduler")
@@ -903,7 +905,7 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
 
-    await _upsert_schedule_config(db_path, config.account_id, paused=0)
+    await _upsert_schedule_config(db_path, config.account_id, paused=0, timezone=config.timezone)
 
     # Resume the specific account's scheduler job
     scheduler = bot_data.get("scheduler")
@@ -976,7 +978,7 @@ async def cmd_setfrequency(
                 raise ValueError("Invalid time")
             formatted_time = f"{hour:02d}:{minute:02d}"
             await _upsert_schedule_config(
-                db_path, config.account_id, preferred_time=formatted_time
+                db_path, config.account_id, preferred_time=formatted_time, timezone=config.timezone
             )
             # Reschedule the APScheduler job with the new time
             await _reschedule_from_db(bot_data, db_path, config)
@@ -997,7 +999,7 @@ async def cmd_setfrequency(
         )
         return
 
-    await _upsert_schedule_config(db_path, config.account_id, frequency=value)
+    await _upsert_schedule_config(db_path, config.account_id, frequency=value, timezone=config.timezone)
     # Reschedule the APScheduler job with the new frequency
     await _reschedule_from_db(bot_data, db_path, config)
     await update.message.reply_text(f"[{config.account_id}] Posting frequency changed to {value}.")

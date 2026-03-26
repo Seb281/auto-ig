@@ -1,5 +1,6 @@
 """Image Sourcing Agent — finds or generates an image for the post."""
 
+import asyncio
 import base64
 import logging
 import os
@@ -40,8 +41,8 @@ _SEARCH_FUNCTIONS = {
 }
 
 
-def _detect_media_type(file_path: str) -> str:
-    """Detect the media type of an image file from its content."""
+def _detect_media_type_sync(file_path: str) -> str:
+    """Detect the media type of an image file from its content (sync)."""
     with open(file_path, "rb") as f:
         header = f.read(16)
 
@@ -58,6 +59,14 @@ def _detect_media_type(file_path: str) -> str:
     return "image/jpeg"
 
 
+def _read_and_encode_sync(file_path: str) -> tuple[str, str]:
+    """Read a file and return (base64_data, media_type) — sync, for use with to_thread."""
+    with open(file_path, "rb") as f:
+        raw = f.read()
+    media_type = _detect_media_type_sync(file_path)
+    return base64.standard_b64encode(raw).decode("utf-8"), media_type
+
+
 async def _score_candidate(
     image_path: str,
     config: AccountConfig,
@@ -66,10 +75,9 @@ async def _score_candidate(
     """Score a single candidate image using Claude vision."""
     prompt_text = build_vision_scoring_prompt(config, brief)
 
-    with open(image_path, "rb") as f:
-        image_data = base64.standard_b64encode(f.read()).decode("utf-8")
-
-    media_type = _detect_media_type(image_path)
+    image_data, media_type = await asyncio.to_thread(
+        _read_and_encode_sync, image_path
+    )
 
     client = anthropic.AsyncAnthropic()
     try:
