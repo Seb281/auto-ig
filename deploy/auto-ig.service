@@ -1,0 +1,40 @@
+[Unit]
+Description=auto-ig — Autonomous Instagram Post Creator
+Documentation=https://github.com/your-repo/auto-ig
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- User & paths (edit to match your VM setup) ---
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/auto-ig
+
+# Load secrets from .env (plain KEY=VALUE format, no 'export' prefix)
+EnvironmentFile=/home/ubuntu/auto-ig/.env
+
+# Launch via the virtualenv Python
+ExecStart=/home/ubuntu/auto-ig/.venv/bin/python main.py --account veggie_alternatives
+
+# --- Restart policy ---
+Restart=on-failure
+RestartSec=10
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=auto-ig
+
+# --- Resource limits (optional, sensible defaults for Oracle Free Tier ARM) ---
+# LimitNOFILE=65536
+
+# --- Security hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/auto-ig/accounts /home/ubuntu/auto-ig/storage
+
+[Install]
+WantedBy=multi-user.target

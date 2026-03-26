@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
 
@@ -14,6 +15,8 @@ from utils.config_loader import (
     load_account_config,
     validate_env_vars,
 )
+
+VERSION = "1.0.0"
 
 logger = logging.getLogger("auto-ig")
 
@@ -33,22 +36,56 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run the full pipeline but skip actual Instagram publishing",
     )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Path to a log file. Enables RotatingFileHandler alongside stdout logging.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"auto-ig {VERSION}",
+    )
     return parser.parse_args()
 
 
-def setup_logging() -> None:
+def setup_logging(log_file: str | None = None) -> None:
     """Configure structured logging for the application."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # Always log to stdout (captured by systemd journal)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(stream_handler)
+
+    # Optionally log to a rotating file
+    if log_file is not None:
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
 
 
 async def main() -> None:
     """Initialize config, database, scheduler, and start the application."""
-    setup_logging()
     args = parse_args()
+    setup_logging(log_file=args.log_file)
+
+    logger.info("auto-ig v%s starting...", VERSION)
 
     load_dotenv()
 
