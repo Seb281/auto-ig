@@ -1,4 +1,4 @@
-"""Reusable Claude prompt templates for the auto-ig pipeline."""
+"""Reusable AI prompt templates for the auto-ig pipeline."""
 
 import json
 import logging
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def _extract_json(text: str) -> dict:
-    """Extract the first valid JSON object from a Claude response string."""
+    """Extract the first valid JSON object from an AI response string."""
     # Strip markdown code fences if present
     stripped = re.sub(r"```(?:json)?\s*", "", text)
     stripped = re.sub(r"```\s*$", "", stripped, flags=re.MULTILINE)
@@ -51,7 +51,7 @@ def build_planner_prompt(
     recent_topics: list[str],
     user_hint: str | None = None,
 ) -> str:
-    """Build the prompt for the Content Planner Claude call."""
+    """Build the prompt for the Content Planner AI call."""
     pillars = ", ".join(config.content_pillars)
     products = ", ".join(config.allowed_products)
     banned = ", ".join(config.banned_topics)
@@ -97,7 +97,7 @@ def build_planner_prompt(
 
 
 def build_caption_prompt(config: AccountConfig, brief: PlannerBrief) -> str:
-    """Build the prompt for the Caption Writer Claude call."""
+    """Build the prompt for the Caption Writer AI call."""
     banned = ", ".join(config.banned_topics)
     keywords = ", ".join(brief.visual_keywords) if brief.visual_keywords else "N/A"
 
@@ -132,7 +132,7 @@ def build_vision_scoring_prompt(
     config: AccountConfig,
     brief: PlannerBrief,
 ) -> str:
-    """Build the prompt for Claude vision scoring of a stock photo candidate."""
+    """Build the prompt for AI vision scoring of a stock photo candidate."""
     keywords = ", ".join(brief.visual_keywords) if brief.visual_keywords else brief.topic
     banned = ", ".join(config.banned_topics)
 
@@ -160,11 +160,11 @@ def build_vision_scoring_prompt(
     return "\n".join(lines)
 
 
-def build_dalle_prompt(
+def build_image_gen_prompt(
     config: AccountConfig,
     brief: PlannerBrief,
 ) -> str:
-    """Build a DALL-E 3 image generation prompt from the content brief."""
+    """Build an AI image generation prompt from the content brief."""
     keywords = ", ".join(brief.visual_keywords) if brief.visual_keywords else brief.topic
 
     return (
@@ -181,7 +181,7 @@ def build_reviewer_vision_prompt(
     brief: PlannerBrief,
     caption: str,
 ) -> str:
-    """Build the prompt for the Reviewer agent's Claude vision check."""
+    """Build the prompt for the Reviewer agent's AI vision check."""
     allowed = ", ".join(config.allowed_products)
     banned = ", ".join(config.banned_topics)
     keywords = ", ".join(brief.visual_keywords) if brief.visual_keywords else brief.topic

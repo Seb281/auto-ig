@@ -3,10 +3,9 @@
 import logging
 
 import aiosqlite
-import anthropic
-
 from agents import PlannerBrief
 from utils.config_loader import AccountConfig
+from utils.ai_client import generate_text
 from utils.prompts import _extract_json, build_planner_prompt
 
 logger = logging.getLogger(__name__)
@@ -22,7 +21,7 @@ async def generate_brief(
     db_path: str,
     user_hint: str | None = None,
 ) -> PlannerBrief:
-    """Generate a content brief by querying history and calling Claude."""
+    """Generate a content brief by querying history and calling AI."""
     # Gather recent topics for deduplication
     recent_topics: list[str] = []
 
@@ -49,19 +48,11 @@ async def generate_brief(
         "Found %d recent topics for deduplication.", len(recent_topics)
     )
 
-    # Build prompt and call Claude
+    # Build prompt and call AI
     prompt = build_planner_prompt(config, recent_topics, user_hint)
+    logger.info("Calling AI for content planning...")
 
-    client = anthropic.AsyncAnthropic()
-    logger.info("Calling Claude for content planning...")
-
-    response = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    raw_text = response.content[0].text
+    raw_text = await generate_text(prompt)
     logger.debug("Planner raw response: %s", raw_text)
 
     # Parse JSON from response
@@ -82,7 +73,7 @@ async def generate_brief(
         content_pillar = pillar_map[normalized]
     else:
         logger.warning(
-            "Claude returned unknown content_pillar '%s'. "
+            "AI returned unknown content_pillar '%s'. "
             "Defaulting to '%s'.",
             raw_pillar,
             config.content_pillars[0],

@@ -2,10 +2,9 @@
 
 import logging
 
-import anthropic
-
 from agents import CaptionResult, PlannerBrief
 from utils.config_loader import AccountConfig
+from utils.ai_client import generate_text
 from utils.prompts import _extract_json, build_caption_prompt
 
 logger = logging.getLogger(__name__)
@@ -15,19 +14,12 @@ async def generate_caption(
     config: AccountConfig,
     brief: PlannerBrief,
 ) -> CaptionResult:
-    """Call Claude with the brief to produce caption, hashtags, and alt_text."""
+    """Call AI with the brief to produce caption, hashtags, and alt_text."""
     prompt = build_caption_prompt(config, brief)
 
-    client = anthropic.AsyncAnthropic()
-    logger.info("Calling Claude for caption writing...")
+    logger.info("Calling AI for caption writing...")
 
-    response = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    raw_text = response.content[0].text
+    raw_text = await generate_text(prompt)
     logger.debug("Caption writer raw response: %s", raw_text)
 
     # Parse JSON from response
@@ -42,12 +34,12 @@ async def generate_caption(
     # Validate caption
     caption = str(data.get("caption", "")).strip()
     if not caption:
-        raise ValueError("Caption is empty in Claude response.")
+        raise ValueError("Caption is empty in AI response.")
 
     # Validate alt_text
     alt_text = str(data.get("alt_text", "")).strip()
     if not alt_text:
-        raise ValueError("alt_text is empty in Claude response.")
+        raise ValueError("alt_text is empty in AI response.")
 
     # Validate and clean hashtags
     raw_hashtags = data.get("hashtags", [])
@@ -55,7 +47,7 @@ async def generate_caption(
         logger.warning("hashtags is not a list, wrapping: %s", raw_hashtags)
         raw_hashtags = [str(raw_hashtags)]
 
-    # Strip leading '#' if Claude included them
+    # Strip leading '#' if AI included them
     hashtags = [str(tag).lstrip("#").strip() for tag in raw_hashtags]
     # Remove any empty strings after stripping
     hashtags = [tag for tag in hashtags if tag]

@@ -71,8 +71,7 @@ _REQUIRED_ACCOUNT_KEYS = [
 _REQUIRED_IMAGE_SOURCING_KEYS = ["stock_score_threshold", "sources", "fallback"]
 
 _GLOBAL_ENV_VARS = [
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
     "UNSPLASH_ACCESS_KEY",
     "PEXELS_API_KEY",
 ]

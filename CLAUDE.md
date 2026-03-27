@@ -20,7 +20,7 @@ To run a milestone end-to-end: invoke `auto-ig-milestone` with "Run Milestone N"
 - `sqlite3` in async context — use `aiosqlite`
 - `BackgroundScheduler` — use `AsyncIOScheduler`
 - `Updater` from telegram — use `Application` (v20+)
-- `anthropic.Anthropic()` — use `anthropic.AsyncAnthropic()`
+- `genai.Client()` without `api_key` — always pass `api_key=os.getenv("GEMINI_API_KEY")`
 - Hardcoded secrets — all via `os.getenv()` after `load_dotenv()`
 - `print()` for logging — use `logging.getLogger(__name__)`
 - `git add -A` or `git add .` — stage specific files only
@@ -37,4 +37,4 @@ To run a milestone end-to-end: invoke `auto-ig-milestone` with "Run Milestone N"
 
 ## Tech stack
 
-Python 3.11+, `anthropic` SDK (AsyncAnthropic, claude-sonnet-4-6), `python-telegram-bot` v20+, `APScheduler` (AsyncIOScheduler), `aiosqlite`, `httpx`, `Pillow`, `imagehash`, `PyYAML`, `python-dotenv`, `openai` (AsyncOpenAI for DALL-E 3 fallback)
+Python 3.11+, `google-genai` SDK (Gemini 2.0 Flash + 2.5 Flash Image, via `utils/ai_client.py`), `python-telegram-bot` v20+, `APScheduler` (AsyncIOScheduler), `aiosqlite`, `httpx`, `Pillow`, `imagehash`, `PyYAML`, `python-dotenv`

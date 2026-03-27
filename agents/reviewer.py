@@ -1,13 +1,11 @@
 """Reviewer Agent — brand rules, vision check, and duplicate detection."""
 
 import asyncio
-import base64
 import logging
 import os
 
-import anthropic
-
 from agents import CaptionResult, ImageResult, PlannerBrief, ReviewResult
+from utils.ai_client import generate_vision, read_image_file
 from utils.config_loader import AccountConfig
 from utils.image_utils import is_duplicate_image
 from utils.prompts import _extract_json, build_reviewer_vision_prompt
@@ -21,31 +19,6 @@ STATUS_FAIL = "FAIL"
 # Valid retry types
 RETRY_IMAGE = "image"
 RETRY_CAPTION = "caption"
-
-
-def _detect_media_type_sync(file_path: str) -> str:
-    """Detect the media type of an image file from its content (sync)."""
-    with open(file_path, "rb") as f:
-        header = f.read(16)
-
-    if header[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
-    elif header[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    elif header[:4] == b"GIF8":
-        return "image/gif"
-    elif header[:4] == b"RIFF" and header[8:12] == b"WEBP":
-        return "image/webp"
-
-    return "image/jpeg"
-
-
-def _read_and_encode_sync(file_path: str) -> tuple[str, str]:
-    """Read a file and return (base64_data, media_type) — sync, for use with to_thread."""
-    with open(file_path, "rb") as f:
-        raw = f.read()
-    media_type = _detect_media_type_sync(file_path)
-    return base64.standard_b64encode(raw).decode("utf-8"), media_type
 
 
 def _check_caption_banned_topics(
@@ -73,39 +46,11 @@ async def _vision_review(
     brief: PlannerBrief,
     caption: str,
 ) -> ReviewResult:
-    """Run Claude vision on the image + caption and return a ReviewResult."""
+    """Run AI vision on the image + caption and return a ReviewResult."""
     prompt_text = build_reviewer_vision_prompt(config, brief, caption)
 
-    image_data, media_type = await asyncio.to_thread(
-        _read_and_encode_sync, image_path
-    )
-
-    client = anthropic.AsyncAnthropic()
-    response = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=512,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": image_data,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt_text,
-                    },
-                ],
-            }
-        ],
-    )
-
-    raw_text = response.content[0].text
+    image_bytes, mime_type = await asyncio.to_thread(read_image_file, image_path)
+    raw_text = await generate_vision(image_bytes, mime_type, prompt_text)
     logger.debug("Reviewer vision raw response: %s", raw_text)
 
     try:
@@ -202,8 +147,8 @@ async def review_post(
             "Banned topic violations found: %s", "; ".join(banned_violations)
         )
 
-    # Check 3: Claude vision review (image + caption together)
-    logger.info("Running Claude vision review on image + caption...")
+    # Check 3: AI vision review (image + caption together)
+    logger.info("Running AI vision review on image + caption...")
     if os.path.exists(image.local_path):
         try:
             vision_result = await _vision_review(

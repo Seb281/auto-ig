@@ -23,7 +23,7 @@ class ImageResult:
     """Output of the Image Sourcing agent."""
 
     local_path: str
-    source: str  # "user" | "unsplash" | "pexels" | "dalle3"
+    source: str  # "user" | "unsplash" | "pexels" | "gemini"
     phash: str
     score: float  # 0.0–1.0
 
