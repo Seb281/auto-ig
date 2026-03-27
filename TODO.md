@@ -28,16 +28,18 @@ Each service below needs an account and an API key. All keys go into `.env`.
 - **Cost**: Free. 200 requests/hour.
 - `.env`: `PEXELS_API_KEY=...`
 
-### Telegram Bot — control interface
-1. Open Telegram, message [@BotFather](https://t.me/botfather)
-2. Send `/newbot`, follow the prompts, pick a name and username
-3. Copy the bot token
-4. Message your new bot (send anything like `/start`)
-5. Get your chat ID: visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser, find `"chat":{"id":...}` in the JSON
-6. `.env`:
+### Discord Bot — control interface
+1. Go to https://discord.com/developers/applications
+2. Click "New Application", give it a name
+3. Go to "Bot" in the left sidebar, click "Reset Token" to get your bot token
+4. Under "Privileged Gateway Intents", enable **Message Content Intent**
+5. Go to "OAuth2" > "URL Generator", select scopes: `bot`, permissions: `Send Messages`, `Attach Files`, `Read Message History`
+6. Open the generated URL to invite the bot to your server
+7. In Discord, right-click the text channel you want to use > "Copy Channel ID" (enable Developer Mode in Settings > Advanced if needed)
+8. `.env`:
    ```
-   TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-   TELEGRAM_CHAT_ID=987654321
+   DISCORD_BOT_TOKEN=your-bot-token
+   DISCORD_CHANNEL_ID=123456789012345678
    ```
 
 ### Meta Graph API (Instagram) — publishing posts
@@ -208,41 +210,44 @@ sudo systemctl restart auto-ig
 cd /home/ubuntu/auto-ig
 .venv/bin/python main.py --account veggie_alternatives --dry-run
 ```
-Then open Telegram, send `/run` to the bot. The pipeline will:
+Then open Discord, send `!run` in the bot's channel. The pipeline will:
 - Generate a topic (Gemini)
 - Find/generate an image (Unsplash/Pexels/Gemini)
 - Write a caption (Gemini)
 - Run review (Gemini vision)
-- Send you the draft on Telegram
+- Send you the draft on Discord
 - **Skip** the actual Instagram publish
 
-This validates that all API keys work, the pipeline runs end-to-end, and Telegram is connected.
+This validates that all API keys work, the pipeline runs end-to-end, and Discord is connected.
 
 ### First real posts
 After dry-run works:
 1. Start the service (VPS: `sudo systemctl start auto-ig` / Railway: deploy via git push)
 2. Monitor logs (VPS: `journalctl -u auto-ig -f` / Railway: dashboard logs)
 3. The scheduler will trigger at `preferred_time` in your timezone
-4. Or send `/run` in Telegram to trigger immediately
-5. Review the first 5-10 drafts manually in Telegram before trusting auto-publish
+4. Or send `!run` in Discord to trigger immediately
+5. Review the first 5-10 drafts manually in Discord before trusting auto-publish
 
 ---
 
 ## 6. Ongoing operations
 
-### Telegram commands available
+### Discord commands available
 | Command | What it does |
 |---------|-------------|
-| `/run` | Trigger pipeline immediately |
-| `/status` | Show scheduler status, next run time |
-| `/pause` | Pause the scheduler |
-| `/resume` | Resume the scheduler |
-| `/setfrequency <value>` | Change frequency: `1d`, `2d`, `3x`, `2x`, `1x`, or `HH:MM` for time |
-| `/history` | Show recent post history |
-| `/approve` | Approve pending draft for publish |
-| `/reject` | Reject pending draft |
-| `/suggest <topic>` | Suggest a topic for the next post |
-| `/cancel` | Cancel auto-publish timer on pending draft |
+| `!start` | Show welcome message and command list |
+| `!run` | Trigger pipeline immediately |
+| `!status` | Show scheduler status, next run time |
+| `!pause` | Pause the scheduler |
+| `!resume` | Resume the scheduler |
+| `!setfrequency <value>` | Change frequency: `1d`, `2d`, `3x`, `2x`, `1x`, or `HH:MM` for time |
+| `!approve` | Approve pending draft for publish |
+| `!skip` | Discard draft, generate a new one |
+| `!edit <caption>` | Replace caption and publish |
+| `!regenerate` | Discard and regenerate from scratch |
+| `!approve_anyway` | Publish despite reviewer failure |
+| `!skip_today` | Skip today's post entirely |
+| `!suggest <topic>` | Suggest a topic for the next post |
 | Send a photo | Upload a photo for the next post (skips stock/Gemini) |
 
 ### Log monitoring (VPS)
@@ -269,7 +274,24 @@ sudo systemctl restart auto-ig
 
 ---
 
-## 7. Not yet built (optional / future)
+## 7. Control interface alternatives
+
+Currently using Discord. If reconsidering in the future, here are the evaluated options:
+
+| Option | Cost | Async Python | Setup | Pros | Cons |
+|--------|------|-------------|-------|------|------|
+| **Discord** (current) | Free | `discord.py` — excellent | Bot token + channel ID | Closest to Telegram, mature library, 1:1 migration | Requires Discord account |
+| **Slack** | Free (limited) | `slack-bolt` AsyncApp | OAuth scopes, Socket Mode | Good command framework, slash commands | 90-day history limit, 10 app cap, must `ack()` within 3s |
+| **Matrix/Element** | Free | `matrix-nio` / `nio-bot` | Register bot on matrix.org | Open-source, self-hostable, no vendor lock-in | Smaller ecosystem, E2E encryption adds complexity |
+| **Ntfy + web UI** | Free (self-host) or $5 one-time (Pushover) | `httpx` / `aiohttp` | Minimal | No chat platform dependency, lightweight | Less interactive, need to build a small web UI for commands |
+| **Web dashboard** | Free (hosting cost only) | FastAPI | Build from scratch | Full control, best UX potential, no third-party dependency | 5-10x more code, need auth + frontend + push notifications |
+| **WhatsApp** | ~$1-3/mo | No async SDK | Business verification (weeks) | Same Meta ecosystem | Complex setup, template approvals, AI bot restrictions |
+| **Signal** | Free | `signalbot` (immature) | signal-cli Java daemon + spare phone number | Privacy-focused | Fragile, unofficial, Java dependency, two-process architecture |
+| **Email** | Free | `aioimaplib` + `aiosmtplib` | Low | No new accounts needed | Terrible UX for interactive commands, latency, spam risk |
+
+---
+
+## 8. Not yet built (optional / future)
 
 These are not blockers — the bot works fully without them.
 

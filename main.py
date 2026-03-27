@@ -2,7 +2,7 @@
 
 Supports running one or more accounts simultaneously. Each account gets
 its own scheduler job and pipeline lock; all accounts share a single
-Telegram bot Application (they must use the same bot token).
+Discord bot (they must use the same bot token).
 """
 
 import argparse
@@ -21,7 +21,7 @@ from utils.config_loader import (
     validate_env_vars,
 )
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 logger = logging.getLogger("auto-ig")
 
@@ -159,10 +159,11 @@ async def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Build Telegram bot with all accounts
+    # Build Discord bot with all accounts
     # ------------------------------------------------------------------
-    from control.telegram_bot import (
-        build_application,
+    from control.discord_bot import (
+        build_bot,
+        get_pending_draft,
         send_draft_for_review,
         send_escalation,
         send_pipeline_error,
@@ -173,7 +174,8 @@ async def main() -> None:
         for config, db_path in loaded_accounts
     ]
 
-    application = build_application(accounts=accounts_tuples)
+    bot = build_bot(accounts=accounts_tuples)
+    bot_data = bot.bot_data
 
     # ------------------------------------------------------------------
     # Scheduler setup — one shared scheduler, per-account jobs
@@ -186,7 +188,6 @@ async def main() -> None:
     )
     from agents.orchestrator import run_pipeline
     from agents import PipelineResult
-    from control.telegram_bot import get_pending_draft
 
     scheduler = create_scheduler()
 
@@ -197,17 +198,16 @@ async def main() -> None:
         sched_config = await load_or_init_schedule(db_path, config)
         pipeline_locks[config.account_id] = asyncio.Lock()
 
-        chat_id = int(os.getenv(config.telegram_chat_id_env, "0"))
+        channel_id = int(os.getenv(config.discord_channel_id_env, "0"))
 
         # Create a per-account scheduled_run closure
         # Use default args to capture current loop variables
         async def make_scheduled_run(
             _config: AccountConfig = config,
             _db_path: str = db_path,
-            _chat_id: int = chat_id,
+            _channel_id: int = channel_id,
         ) -> None:
             """Run the pipeline on a schedule for a specific account."""
-            bot_data = application.bot_data
             acct_lock = pipeline_locks[_config.account_id]
             pipeline_key = f"pipeline_running_{_config.account_id}"
 
@@ -245,23 +245,25 @@ async def main() -> None:
                 )
 
                 if result.error:
-                    await send_pipeline_error(application, _chat_id, result.error)
+                    await send_pipeline_error(bot, _channel_id, result.error)
                     return
 
                 if result.success:
                     await send_draft_for_review(
-                        application, _chat_id, result, bot_data
+                        bot, _channel_id, result, bot_data
                     )
                 elif result.review and result.review.status == "FAIL":
                     await send_draft_for_review(
-                        application, _chat_id, result, bot_data
+                        bot, _channel_id, result, bot_data
                     )
-                    await send_escalation(application, _chat_id, result)
+                    await send_escalation(bot, _channel_id, result)
                 else:
-                    await application.bot.send_message(
-                        chat_id=_chat_id,
-                        text=f"[{_config.account_id}] Scheduled pipeline completed but produced no publishable result.",
-                    )
+                    await bot.wait_until_ready()
+                    channel = bot.get_channel(_channel_id)
+                    if channel is not None:
+                        await channel.send(
+                            content=f"[{_config.account_id}] Scheduled pipeline completed but produced no publishable result.",
+                        )
 
             except Exception as exc:
                 logger.error(
@@ -271,7 +273,7 @@ async def main() -> None:
                     exc_info=True,
                 )
                 try:
-                    await send_pipeline_error(application, _chat_id, str(exc))
+                    await send_pipeline_error(bot, _channel_id, str(exc))
                 except Exception:
                     logger.error("Failed to send error notification.", exc_info=True)
 
@@ -288,21 +290,18 @@ async def main() -> None:
             account_id=config.account_id,
         )
 
-        # Store the run function in bot_data so Telegram commands (setfrequency) can reschedule
+        # Store the run function in bot_data so Discord commands (setfrequency) can reschedule
         run_func_key = f"scheduled_run_func_{config.account_id}"
-        application.bot_data[run_func_key] = make_scheduled_run
+        bot_data[run_func_key] = make_scheduled_run
 
         # If schedule is paused in DB, pause the job immediately after scheduler starts
         if sched_config.get("paused"):
-            # We'll pause after scheduler.start() below
-            application.bot_data[f"_paused_on_start_{config.account_id}"] = True
+            bot_data[f"_paused_on_start_{config.account_id}"] = True
 
-    # Store scheduler in bot_data so Telegram commands can access it
-    application.bot_data["scheduler"] = scheduler
+    # Store scheduler in bot_data so Discord commands can access it
+    bot_data["scheduler"] = scheduler
 
-    logger.info("Starting Telegram bot (polling)...")
-
-    await application.initialize()
+    logger.info("Starting Discord bot...")
 
     # Start the scheduler (shares the asyncio event loop)
     scheduler.start()
@@ -311,7 +310,7 @@ async def main() -> None:
     # Pause any accounts that were marked as paused in the DB
     for config, db_path in loaded_accounts:
         paused_key = f"_paused_on_start_{config.account_id}"
-        if application.bot_data.pop(paused_key, False):
+        if bot_data.pop(paused_key, False):
             job_id = pipeline_job_id(config.account_id)
             job = scheduler.get_job(job_id)
             if job is not None:
@@ -321,10 +320,11 @@ async def main() -> None:
                     job_id,
                 )
 
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
+    # Run the Discord bot as a background task
+    token = bot_data.pop("token")
+    bot_task = asyncio.create_task(bot.start(token))
 
-    logger.info("Telegram bot is running. Press Ctrl+C to stop.")
+    logger.info("Discord bot is running. Press Ctrl+C to stop.")
 
     # Keep the bot running until interrupted
     stop_event = asyncio.Event()
@@ -353,11 +353,14 @@ async def main() -> None:
         scheduler.shutdown(wait=False)
         logger.info("APScheduler shut down.")
 
-        # Shut down the Telegram bot
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
-        logger.info("Telegram bot stopped.")
+        # Shut down the Discord bot
+        await bot.close()
+        bot_task.cancel()
+        try:
+            await bot_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Discord bot stopped.")
 
 
 if __name__ == "__main__":

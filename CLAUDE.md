@@ -1,6 +1,6 @@
 # auto-ig — Project Instructions
 
-Autonomous Instagram post creator. AI pipeline that generates and publishes single-image posts, controlled via Telegram.
+Autonomous Instagram post creator. AI pipeline that generates and publishes single-image posts, controlled via Discord.
 
 ## Agent workflow
 
@@ -19,7 +19,7 @@ To run a milestone end-to-end: invoke `auto-ig-milestone` with "Run Milestone N"
 - `requests` — blocking, use `httpx.AsyncClient`
 - `sqlite3` in async context — use `aiosqlite`
 - `BackgroundScheduler` — use `AsyncIOScheduler`
-- `Updater` from telegram — use `Application` (v20+)
+- `python-telegram-bot` — replaced by `discord.py`
 - `genai.Client()` without `api_key` — always pass `api_key=os.getenv("GEMINI_API_KEY")`
 - Hardcoded secrets — all via `os.getenv()` after `load_dotenv()`
 - `print()` for logging — use `logging.getLogger(__name__)`
@@ -37,4 +37,4 @@ To run a milestone end-to-end: invoke `auto-ig-milestone` with "Run Milestone N"
 
 ## Tech stack
 
-Python 3.11+, `google-genai` SDK (Gemini 2.0 Flash + 2.5 Flash Image, via `utils/ai_client.py`), `python-telegram-bot` v20+, `APScheduler` (AsyncIOScheduler), `aiosqlite`, `httpx`, `Pillow`, `imagehash`, `PyYAML`, `python-dotenv`
+Python 3.11+, `google-genai` SDK (Gemini 2.0 Flash + 2.5 Flash Image, via `utils/ai_client.py`), `discord.py` 2.x, `APScheduler` (AsyncIOScheduler), `aiosqlite`, `httpx`, `Pillow`, `imagehash`, `PyYAML`, `python-dotenv`

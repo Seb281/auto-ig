@@ -2,7 +2,7 @@
 
 Wraps AsyncIOScheduler to provide frequency-based automatic pipeline runs.
 Schedule configuration is persisted in the schedule_config SQLite table and
-can be changed at runtime via the Telegram /setfrequency command.
+can be changed at runtime via the Discord !setfrequency command.
 
 Supports multi-account: each account gets its own scheduler job with a unique
 job ID derived from the account_id.

@@ -38,8 +38,8 @@ class AccountConfig:
     preferred_time: str
     timezone: str
 
-    telegram_bot_token_env: str
-    telegram_chat_id_env: str
+    discord_bot_token_env: str
+    discord_channel_id_env: str
     auto_publish_timeout_hours: int
 
     content_pillars: list[str]
@@ -60,8 +60,8 @@ _REQUIRED_ACCOUNT_KEYS = [
     "post_frequency",
     "preferred_time",
     "timezone",
-    "telegram_bot_token_env",
-    "telegram_chat_id_env",
+    "discord_bot_token_env",
+    "discord_channel_id_env",
     "auto_publish_timeout_hours",
     "content_pillars",
     "image_sourcing",
@@ -122,8 +122,8 @@ def load_account_config(config_path: str) -> AccountConfig:
         post_frequency=str(raw["post_frequency"]),
         preferred_time=str(raw["preferred_time"]),
         timezone=str(raw["timezone"]),
-        telegram_bot_token_env=str(raw["telegram_bot_token_env"]),
-        telegram_chat_id_env=str(raw["telegram_chat_id_env"]),
+        discord_bot_token_env=str(raw["discord_bot_token_env"]),
+        discord_channel_id_env=str(raw["discord_channel_id_env"]),
         auto_publish_timeout_hours=int(raw["auto_publish_timeout_hours"]),
         content_pillars=list(raw["content_pillars"]),
         image_sourcing=image_sourcing,
@@ -135,8 +135,8 @@ def validate_env_vars(config: AccountConfig) -> None:
     """Validate that all required environment variables are set and non-empty."""
     required = list(_GLOBAL_ENV_VARS) + [
         config.access_token_env,
-        config.telegram_bot_token_env,
-        config.telegram_chat_id_env,
+        config.discord_bot_token_env,
+        config.discord_channel_id_env,
     ]
 
     missing = [var for var in required if not os.getenv(var)]
