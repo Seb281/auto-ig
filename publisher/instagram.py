@@ -14,7 +14,7 @@ from utils.config_loader import AccountConfig
 logger = logging.getLogger(__name__)
 
 # Meta Graph API base URL and version
-_GRAPH_API_BASE = "https://graph.facebook.com/v22.0"
+_GRAPH_API_BASE = "https://graph.facebook.com/v25.0"
 
 # Polling configuration
 _POLL_INTERVAL_SECONDS = 3
