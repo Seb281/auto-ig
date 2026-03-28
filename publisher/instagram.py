@@ -79,7 +79,7 @@ async def _create_container(
         params["alt_text"] = alt_text
 
     try:
-        response = await client.post(url, params=params)
+        response = await client.post(url, data=params)
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         body = exc.response.text
@@ -163,7 +163,7 @@ async def _publish_container(
     params = {"creation_id": container_id, "access_token": token}
 
     try:
-        response = await client.post(url, params=params)
+        response = await client.post(url, data=params)
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         body = exc.response.text
