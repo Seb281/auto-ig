@@ -9,9 +9,9 @@ from google.genai import types
 logger = logging.getLogger(__name__)
 
 # Model constants — single place to change when switching providers
-TEXT_MODEL = "gemini-2.0-flash"
-VISION_MODEL = "gemini-2.0-flash"
-IMAGE_GEN_MODEL = "gemini-2.5-flash-preview-image-generation"
+TEXT_MODEL = "gemini-2.5-flash"
+VISION_MODEL = "gemini-2.5-flash"
+IMAGE_GEN_MODEL = "gemini-2.5-flash-image"
 
 
 def _get_client() -> genai.Client:
