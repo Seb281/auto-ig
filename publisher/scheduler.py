@@ -210,7 +210,8 @@ def get_next_run_time(
     job = scheduler.get_job(job_id)
     if job is None:
         return None
-    next_run = job.next_run_time
+    # APScheduler v3 uses job.next_run_time, v4 may differ
+    next_run = getattr(job, "next_run_time", None)
     if next_run is None:
         return None
     return next_run.isoformat()
