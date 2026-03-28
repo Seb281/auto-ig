@@ -100,23 +100,30 @@ class TempImageServer:
         self._directory = os.path.dirname(self._image_path)
         self._filename = os.path.basename(self._image_path)
 
-        # Determine public IP
+        # Determine public base URL
+        # PUBLIC_URL (e.g. "auto-ig.up.railway.app") takes priority — uses HTTPS, no port
+        # PUBLIC_IP (e.g. "1.2.3.4") uses HTTP with explicit port
+        public_url = os.getenv("PUBLIC_URL")
         public_ip = os.getenv("PUBLIC_IP")
-        if public_ip:
-            self._public_ip = public_ip
+        if public_url:
+            self._base_url = f"https://{public_url}"
+            logger.info("Using PUBLIC_URL for image serving: %s", self._base_url)
+        elif public_ip:
+            self._base_url = f"http://{public_ip}:{self._port}"
         else:
-            self._public_ip = socket.gethostbyname(socket.gethostname())
+            fallback_ip = socket.gethostbyname(socket.gethostname())
+            self._base_url = f"http://{fallback_ip}:{self._port}"
             logger.warning(
-                "PUBLIC_IP env var not set — falling back to %s. "
+                "Neither PUBLIC_URL nor PUBLIC_IP env var set — falling back to %s. "
                 "This will likely not work for Meta Graph API in production "
-                "(Meta needs a publicly reachable IP).",
-                self._public_ip,
+                "(Meta needs a publicly reachable URL).",
+                self._base_url,
             )
 
     @property
     def url(self) -> str:
         """Return the public URL for the served image."""
-        return f"http://{self._public_ip}:{self._port}/{self._filename}"
+        return f"{self._base_url}/{self._filename}"
 
     def __enter__(self) -> str:
         """Start the HTTP server in a daemon thread and return the public URL."""
