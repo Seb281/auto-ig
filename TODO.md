@@ -183,7 +183,7 @@ What to change:
 3. Edit the new config:
    - `account_id`: must match the directory name exactly
    - `access_token_env`: a unique env var name (e.g., `"MYACCOUNT_IG_TOKEN"`)
-   - `telegram_chat_id_env`: unique if different chat, or shared if same Telegram chat
+   - `discord_channel_id_env`: unique if different channel, or shared if same Discord channel
    - `temp_http_port`: must be unique per account (e.g., 8766, 8767)
    - Customize niche, tone, products, pillars, etc.
 4. Add the new env vars to `.env` (or Railway dashboard)
@@ -295,11 +295,11 @@ Currently using Discord. If reconsidering in the future, here are the evaluated 
 
 These are not blockers — the bot works fully without them.
 
-- **Migrate to production AI providers**: The codebase uses Anthropic Claude + OpenAI DALL-E 3. Currently configured with Google Gemini free tier for testing. When ready for production quality, switch back to Claude (better reasoning) and DALL-E 3 (better image generation) — requires `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`.
+- **Migrate to production AI providers**: Currently using Google Gemini free tier for all AI tasks (text, vision, image generation). When ready for production quality, consider Claude (better reasoning) and DALL-E 3 (better image generation) — would require adding `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` and updating `utils/ai_client.py`.
 - **System User token for Instagram**: Current setup uses a 60-day long-lived User Token. For never-expiring access, create a System User token via Meta Business Manager (requires Business Verification — can take hours to days). See Meta docs on System Users.
 - **Token refresh automation**: If staying with the 60-day User Token, add a cron job or manual process to refresh it before expiry.
 - **Unit tests**: No test files exist. Consider adding `pytest` + `pytest-asyncio` tests for the agents and publisher if you want a safety net before making changes.
 - **README.md**: No root-level README (PLAN.md and deploy/README.md serve as documentation). Add one if you plan to make the repo public.
-- **Monitoring / alerting**: The bot sends Telegram messages on pipeline errors, but there's no external uptime monitoring. Consider UptimeRobot (free) pointing at your service URL to detect downtime.
+- **Monitoring / alerting**: The bot sends Discord messages on pipeline errors, but there's no external uptime monitoring. Consider UptimeRobot (free) pointing at your service URL to detect downtime.
 - **Backup**: SQLite databases under `accounts/*/post_history.db` contain your post history and pending drafts. Consider periodic backups (Railway Volume snapshots or `scp`/`rsync` from VPS).
 - **Rate limiting**: The code doesn't track Meta API rate limits (25 posts/24h). At daily posting this is not a concern, but at higher frequencies or with many accounts it could be.
