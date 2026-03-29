@@ -7,7 +7,7 @@ from agents import CaptionResult, ImageResult, PipelineResult, PlannerBrief, Rev
 from agents.caption_writer import generate_caption
 from agents.content_planner import generate_brief
 from agents.image_sourcing import source_image
-from agents.reviewer import review_post
+from agents.reviewer import review_post, RETRY_CAPTION, RETRY_IMAGE, STATUS_PASS
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ async def run_pipeline(
             logger.info("Running reviewer (attempt %d/%d)...", attempt, MAX_REVIEW_RETRIES)
             review = await review_post(config, brief, image, caption, db_path)
 
-            if review.status == "PASS":
+            if review.status == STATUS_PASS:
                 logger.info("Reviewer PASSED on attempt %d.", attempt)
                 break
 
@@ -97,7 +97,7 @@ async def run_pipeline(
                 break
 
             # Retry the appropriate upstream step
-            if review.retry_type == "image":
+            if review.retry_type == RETRY_IMAGE:
                 logger.info("Re-sourcing image for retry...")
                 image = await source_image(
                     config=config,
@@ -112,7 +112,7 @@ async def run_pipeline(
                     image.source,
                     image.score,
                 )
-            elif review.retry_type == "caption":
+            elif review.retry_type == RETRY_CAPTION:
                 logger.info("Regenerating caption for retry...")
                 caption = await generate_caption(config, brief)
                 logger.info("Caption regenerated.")
@@ -121,9 +121,7 @@ async def run_pipeline(
                 logger.info("No retry_type specified — regenerating caption.")
                 caption = await generate_caption(config, brief)
 
-        # Determine review outcome — actual publishing is handled by the
-        # Discord approval layer (_do_publish_draft), NOT here.
-        review_passed = review is not None and review.status == "PASS"
+        review_passed = review is not None and review.status == STATUS_PASS
 
         if not review_passed:
             logger.warning("Reviewer did not pass — content will be escalated.")

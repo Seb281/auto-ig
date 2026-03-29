@@ -14,6 +14,7 @@ from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
 
+from agents.reviewer import STATUS_FAIL
 from utils.config_loader import (
     AccountConfig,
     init_db,
@@ -252,7 +253,7 @@ async def main() -> None:
                     await send_draft_for_review(
                         bot, _channel_id, result, bot_data
                     )
-                elif result.review and result.review.status == "FAIL":
+                elif result.review and result.review.status == STATUS_FAIL:
                     await send_draft_for_review(
                         bot, _channel_id, result, bot_data
                     )

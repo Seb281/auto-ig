@@ -2,17 +2,6 @@
 
 Autonomous Instagram post creator. AI pipeline that generates and publishes single-image posts, controlled via Discord.
 
-## Agent workflow
-
-This project uses 4 specialized agents in `.claude/agents/`:
-
-- **auto-ig-planner** — Read-only. Plans a milestone. Invoke first.
-- **auto-ig-builder** — Implements code. Invoke with planner output.
-- **auto-ig-reviewer** — Read-only. Reviews code, returns PASS/FAIL. Only CRITICAL issues cause FAIL.
-- **auto-ig-milestone** — Orchestrator. Chains planner -> builder -> reviewer automatically with retry.
-
-To run a milestone end-to-end: invoke `auto-ig-milestone` with "Run Milestone N".
-
 ## Banned (never use these)
 
 - `instagrapi` — TOS violation, use Meta Graph API
@@ -37,4 +26,4 @@ To run a milestone end-to-end: invoke `auto-ig-milestone` with "Run Milestone N"
 
 ## Tech stack
 
-Python 3.11+, `google-genai` SDK (Gemini 2.0 Flash + 2.5 Flash Image, via `utils/ai_client.py`), `discord.py` 2.x, `APScheduler` (AsyncIOScheduler), `aiosqlite`, `httpx`, `Pillow`, `imagehash`, `PyYAML`, `python-dotenv`
+Python 3.11+, `google-genai` SDK (Gemini 2.5 Flash family, via `utils/ai_client.py`), `discord.py` 2.x, `APScheduler` (AsyncIOScheduler), `aiosqlite`, `httpx`, `Pillow`, `imagehash`, `PyYAML`, `python-dotenv`

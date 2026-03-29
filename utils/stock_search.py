@@ -1,5 +1,6 @@
 """Async stock photo search clients for Unsplash and Pexels APIs."""
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -146,6 +147,12 @@ async def search_pexels(
     return results
 
 
+def _write_bytes_sync(path: str, data: bytes) -> None:
+    """Write raw bytes to a file (sync, for use with to_thread)."""
+    with open(path, "wb") as f:
+        f.write(data)
+
+
 async def download_image(url: str, dest_path: str) -> str:
     """Download an image from a URL and save it to the destination path."""
     try:
@@ -161,8 +168,7 @@ async def download_image(url: str, dest_path: str) -> str:
     if dest_dir:
         os.makedirs(dest_dir, exist_ok=True)
 
-    with open(dest_path, "wb") as f:
-        f.write(response.content)
+    await asyncio.to_thread(_write_bytes_sync, dest_path, response.content)
 
     logger.info("Downloaded image to %s (%d bytes).", dest_path, len(response.content))
     return dest_path

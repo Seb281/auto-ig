@@ -26,9 +26,12 @@ import httpx
 
 from agents import PipelineResult, PlannerBrief
 from agents.orchestrator import run_pipeline
+from agents.reviewer import STATUS_FAIL
+from publisher.instagram import publish_post, save_post_record
 from publisher.scheduler import get_next_run_time, pipeline_job_id, schedule_pipeline_job
 from utils.ai_client import generate_text, generate_image
 from utils.config_loader import AccountConfig
+from utils.image_utils import is_duplicate_image
 
 logger = logging.getLogger(__name__)
 
@@ -330,16 +333,13 @@ async def _do_publish_draft(
         return
 
     # Guard: block duplicate images at publish time
-    if image_phash:
-        from utils.image_utils import is_duplicate_image
-
-        if await is_duplicate_image(image_phash, db_path, config.account_id):
-            logger.warning("Draft %d blocked — duplicate image detected at publish time.", draft_id)
-            await _update_draft_status(db_path, draft_id, "skipped")
-            await channel.send(
-                content=f"Draft #{draft_id} blocked — image is too similar to a previous post. Use !run to generate a new one.",
-            )
-            return
+    if image_phash and await is_duplicate_image(image_phash, db_path, config.account_id):
+        logger.warning("Draft %d blocked — duplicate image detected at publish time.", draft_id)
+        await _update_draft_status(db_path, draft_id, "skipped")
+        await channel.send(
+            content=f"Draft #{draft_id} blocked — image is too similar to a previous post. Use !run to generate a new one.",
+        )
+        return
 
     try:
         if dry_run:
@@ -347,14 +347,10 @@ async def _do_publish_draft(
             media_id = None
             prefix = "[DRY RUN] "
         else:
-            from publisher.instagram import publish_post
-
             media_id = await publish_post(
                 config, image_path, full_caption, alt_text
             )
             prefix = ""
-
-        from publisher.instagram import save_post_record
 
         await save_post_record(
             db_path=db_path,
@@ -725,7 +721,7 @@ async def cmd_runstock(ctx: commands.Context) -> None:
 
         if result.success:
             await send_draft_for_review(bot, channel_id, result, bot_data)
-        elif result.review and result.review.status == "FAIL":
+        elif result.review and result.review.status == STATUS_FAIL:
             await send_draft_for_review(bot, channel_id, result, bot_data)
             await send_escalation(bot, channel_id, result)
         else:
@@ -793,7 +789,7 @@ async def cmd_run(ctx: commands.Context) -> None:
 
         if result.success:
             await send_draft_for_review(bot, channel_id, result, bot_data)
-        elif result.review and result.review.status == "FAIL":
+        elif result.review and result.review.status == STATUS_FAIL:
             await send_draft_for_review(bot, channel_id, result, bot_data)
             await send_escalation(bot, channel_id, result)
         else:
@@ -1290,9 +1286,9 @@ async def _handle_photo_message(bot: commands.Bot, message: discord.Message) -> 
             await send_pipeline_error(bot, channel_id, result.error)
             return
 
-        if result.success or (result.review and result.review.status == "FAIL"):
+        if result.success or (result.review and result.review.status == STATUS_FAIL):
             await send_draft_for_review(bot, channel_id, result, bot_data)
-            if result.review and result.review.status == "FAIL":
+            if result.review and result.review.status == STATUS_FAIL:
                 await send_escalation(bot, channel_id, result)
         else:
             await message.channel.send(

@@ -18,7 +18,7 @@ EnvironmentFile=/home/ubuntu/auto-ig/.env
 # Launch via the virtualenv Python
 # Single account:
 #   ExecStart=/home/ubuntu/auto-ig/.venv/bin/python main.py --account veggie_alternatives
-# Multi-account (all accounts share one Telegram bot, each has its own scheduler):
+# Multi-account (all accounts share one Discord bot, each has its own scheduler):
 ExecStart=/home/ubuntu/auto-ig/.venv/bin/python main.py --account veggie_alternatives --account fitness_meals
 
 # --- Restart policy ---
@@ -30,7 +30,7 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=auto-ig
 
-# --- Resource limits (optional, sensible defaults for Oracle Free Tier ARM) ---
+# --- Resource limits (optional) ---
 # LimitNOFILE=65536
 
 # --- Security hardening ---

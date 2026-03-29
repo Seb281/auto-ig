@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------
-# auto-ig — Oracle Cloud VM Setup Script
+# auto-ig — VPS Setup Script
 #
 # Installs Python, creates a virtualenv, installs dependencies,
 # opens the temp HTTP port, and enables the systemd service.
@@ -160,11 +160,9 @@ echo ""
 echo "  1. Edit .env with your API keys:"
 echo "       nano .env"
 echo ""
-echo "  2. IMPORTANT: Open port(s) in Oracle Cloud Console:"
-echo "       VCN > Subnet > Security List > Add Ingress Rule"
-echo "       Source CIDR: 0.0.0.0/0"
-echo "       Destination Port: $TEMP_HTTP_PORT (and any other account ports)"
-echo "       Protocol: TCP"
+echo "  2. IMPORTANT: Open port $TEMP_HTTP_PORT in your cloud provider's firewall"
+echo "       (e.g. Security Group, firewall rules, etc.)"
+echo "       Allow inbound TCP on port $TEMP_HTTP_PORT from 0.0.0.0/0"
 echo ""
 echo "  3. Start the service:"
 echo "       sudo systemctl start $SERVICE_NAME"
