@@ -167,6 +167,10 @@ async def run_pipeline(
 
     except Exception as exc:
         logger.error("Pipeline failed: %s", exc, exc_info=True)
+        # Clean up image on error — no draft will be created to manage it
+        if image is not None and image.local_path and os.path.exists(image.local_path):
+            os.remove(image.local_path)
+            logger.info("Cleaned up image after error: %s", image.local_path)
         return PipelineResult(
             success=False,
             post_id=None,
@@ -177,9 +181,3 @@ async def run_pipeline(
             error=str(exc),
             skipped=False,
         )
-
-    finally:
-        # Always clean up temporary image files
-        if image is not None and image.local_path and os.path.exists(image.local_path):
-            os.remove(image.local_path)
-            logger.info("Cleaned up image: %s", image.local_path)

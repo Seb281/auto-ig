@@ -421,7 +421,7 @@ async def send_draft_for_review(
         )
         return
 
-    # Copy image to a draft-specific path so the orchestrator's cleanup doesn't affect us
+    # Copy image to a draft-specific path, then clean up the pipeline's original
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     media_dir = os.path.join(base_dir, "storage", "media")
     os.makedirs(media_dir, exist_ok=True)
@@ -429,6 +429,9 @@ async def send_draft_for_review(
         media_dir, f"draft_{os.path.basename(result.image.local_path)}"
     )
     await asyncio.to_thread(shutil.copy2, result.image.local_path, draft_image_path)
+    # Clean up the original pipeline image now that we have our copy
+    if os.path.exists(result.image.local_path):
+        os.remove(result.image.local_path)
 
     # Save to pending_drafts
     draft_id = await _save_pending_draft(
@@ -667,6 +670,7 @@ async def cmd_runstock(ctx: commands.Context) -> None:
 
     bot_data[pipeline_key] = True
     await ctx.send(f"[{config.account_id}] Starting pipeline run (stock images only)...")
+    result: PipelineResult | None = None
 
     try:
         suggest_key = f"suggested_topic_{config.account_id}"
@@ -700,6 +704,10 @@ async def cmd_runstock(ctx: commands.Context) -> None:
 
     finally:
         bot_data[pipeline_key] = False
+        # Clean up pipeline image if send_draft_for_review didn't get to it
+        if result is not None and result.image and result.image.local_path:
+            if os.path.exists(result.image.local_path):
+                os.remove(result.image.local_path)
 
 
 async def cmd_run(ctx: commands.Context) -> None:
@@ -731,12 +739,13 @@ async def cmd_run(ctx: commands.Context) -> None:
 
     bot_data[pipeline_key] = True
     await ctx.send(f"[{config.account_id}] Starting pipeline run...")
+    result: PipelineResult | None = None
 
     try:
         suggest_key = f"suggested_topic_{config.account_id}"
         user_hint = bot_data.pop(suggest_key, None)
 
-        result: PipelineResult = await run_pipeline(
+        result = await run_pipeline(
             config=config,
             db_path=db_path,
             user_hint=user_hint,
@@ -763,6 +772,10 @@ async def cmd_run(ctx: commands.Context) -> None:
 
     finally:
         bot_data[pipeline_key] = False
+        # Clean up pipeline image if send_draft_for_review didn't get to it
+        if result is not None and result.image and result.image.local_path:
+            if os.path.exists(result.image.local_path):
+                os.remove(result.image.local_path)
 
 
 async def cmd_approve(ctx: commands.Context) -> None:
