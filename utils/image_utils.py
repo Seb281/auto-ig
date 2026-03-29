@@ -18,6 +18,13 @@ INSTAGRAM_PORTRAIT = (1080, 1350)
 
 def _resize_sync(image_path: str, output_path: str, target_size: tuple[int, int]) -> str:
     """Synchronous image resize — meant to be called via asyncio.to_thread."""
+    if not os.path.isfile(image_path):
+        raise FileNotFoundError(f"Input image does not exist: {image_path}")
+
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
     try:
         img = Image.open(image_path)
         img.load()

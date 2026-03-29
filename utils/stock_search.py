@@ -157,6 +157,10 @@ async def download_image(url: str, dest_path: str) -> str:
     except httpx.HTTPError as exc:
         raise ConnectionError(f"Failed to download image from {url}: {exc}") from exc
 
+    dest_dir = os.path.dirname(dest_path)
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
+
     with open(dest_path, "wb") as f:
         f.write(response.content)
 
