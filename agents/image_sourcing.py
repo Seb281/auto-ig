@@ -128,6 +128,7 @@ async def source_image(
     db_path: str,
     media_dir: str,
     user_photo_path: str | None = None,
+    stock_only: bool = False,
 ) -> ImageResult:
     """Source an image following priority: user photo -> stock -> AI generation."""
     os.makedirs(media_dir, exist_ok=True)
@@ -187,11 +188,15 @@ async def source_image(
                 config.image_sourcing.stock_score_threshold,
             )
 
-        # Use stock photo if it meets the threshold
-        if (
-            best_path is not None
-            and best_score >= config.image_sourcing.stock_score_threshold
-        ):
+        # In stock_only mode, accept any stock photo; otherwise require threshold
+        score_ok = (
+            best_score >= config.image_sourcing.stock_score_threshold
+            if not stock_only
+            else best_score > 0.0
+        )
+
+        # Use stock photo if it meets the threshold (or stock_only forces it)
+        if best_path is not None and score_ok:
             resized_filename = f"resized_{uuid.uuid4().hex[:8]}.jpg"
             resized_path = os.path.join(media_dir, resized_filename)
             await resize_for_instagram(best_path, resized_path)
@@ -225,6 +230,10 @@ async def source_image(
                 )
 
         # Priority 3: AI image generation fallback
+        if stock_only:
+            raise RuntimeError(
+                "No suitable stock photo found and AI image generation is disabled (stock_only mode)."
+            )
         logger.info("Falling back to AI image generation.")
         generated_path = await _generate_ai_image(config, brief, media_dir)
         temp_files.append(generated_path)

@@ -23,6 +23,7 @@ async def run_pipeline(
     user_photo_path: str | None = None,
     user_hint: str | None = None,
     dry_run: bool = False,
+    stock_only: bool = False,
 ) -> PipelineResult:
     """Run the content pipeline and return a PipelineResult."""
     if dry_run:
@@ -58,6 +59,7 @@ async def run_pipeline(
             db_path=db_path,
             media_dir=media_dir,
             user_photo_path=user_photo_path,
+            stock_only=stock_only,
         )
         logger.info(
             "Image sourced — source: %s, score: %.2f, path: %s",
@@ -104,6 +106,7 @@ async def run_pipeline(
                     db_path=db_path,
                     media_dir=media_dir,
                     user_photo_path=user_photo_path,
+                    stock_only=stock_only,
                 )
                 logger.info(
                     "Image re-sourced — source: %s, score: %.2f",

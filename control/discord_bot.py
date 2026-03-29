@@ -22,9 +22,12 @@ import aiosqlite
 import discord
 from discord.ext import commands
 
+import httpx
+
 from agents import PipelineResult, PlannerBrief
 from agents.orchestrator import run_pipeline
 from publisher.scheduler import get_next_run_time, pipeline_job_id, schedule_pipeline_job
+from utils.ai_client import generate_text, generate_image
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
@@ -512,6 +515,8 @@ async def cmd_start(ctx: commands.Context) -> None:
         "auto-ig bot is running.\n\n"
         "Commands:\n"
         "!run — trigger a pipeline run\n"
+        "!runstock — run using only stock photos (no AI image gen)\n"
+        "!check — ping all external services\n"
         "!status — show last run and schedule\n"
         "!approve — publish the pending draft\n"
         "!skip — discard draft, generate a new one\n"
@@ -524,6 +529,177 @@ async def cmd_start(ctx: commands.Context) -> None:
         "!resume — resume the scheduler\n"
         "!setfrequency <value> — change posting schedule\n"
     )
+
+
+async def cmd_check(ctx: commands.Context) -> None:
+    """Handle !check — ping all external services and report status."""
+    bot_data = ctx.bot.bot_data
+    channel_id = ctx.channel.id
+
+    acct_ctx = _get_account_context(bot_data, channel_id)
+    if acct_ctx is None:
+        await ctx.send("No account is configured for this channel.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    await ctx.send("Checking services...")
+    lines: list[str] = []
+
+    # 1. Gemini text
+    try:
+        resp = await generate_text("Reply with exactly: OK")
+        lines.append(f"Gemini text: OK")
+    except Exception as exc:
+        lines.append(f"Gemini text: FAIL — {_truncate(str(exc), 120)}")
+
+    # 2. Gemini image generation
+    try:
+        await generate_image("A solid blue square")
+        lines.append("Gemini image gen: OK")
+    except Exception as exc:
+        lines.append(f"Gemini image gen: FAIL — {_truncate(str(exc), 120)}")
+
+    # 3. Unsplash
+    try:
+        key = os.getenv("UNSPLASH_ACCESS_KEY")
+        if not key:
+            lines.append("Unsplash: FAIL — UNSPLASH_ACCESS_KEY not set")
+        else:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    "https://api.unsplash.com/search/photos",
+                    params={"query": "food", "per_page": 1},
+                    headers={"Authorization": f"Client-ID {key}"},
+                )
+            if r.status_code == 200:
+                lines.append("Unsplash: OK")
+            else:
+                lines.append(f"Unsplash: FAIL — HTTP {r.status_code}")
+    except Exception as exc:
+        lines.append(f"Unsplash: FAIL — {_truncate(str(exc), 120)}")
+
+    # 4. Pexels
+    try:
+        key = os.getenv("PEXELS_API_KEY")
+        if not key:
+            lines.append("Pexels: FAIL — PEXELS_API_KEY not set")
+        else:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    "https://api.pexels.com/v1/search",
+                    params={"query": "food", "per_page": 1},
+                    headers={"Authorization": key},
+                )
+            if r.status_code == 200:
+                lines.append("Pexels: OK")
+            else:
+                lines.append(f"Pexels: FAIL — HTTP {r.status_code}")
+    except Exception as exc:
+        lines.append(f"Pexels: FAIL — {_truncate(str(exc), 120)}")
+
+    # 5. Meta Graph API — check permissions
+    try:
+        token = os.getenv(config.access_token_env)
+        if not token:
+            lines.append(f"Meta API: FAIL — {config.access_token_env} not set")
+        else:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    "https://graph.facebook.com/v25.0/me",
+                    params={"fields": "id,name", "access_token": token},
+                )
+            data = r.json()
+            if "error" in data:
+                err_msg = data["error"].get("message", "Unknown")
+                lines.append(f"Meta API: FAIL — {_truncate(err_msg, 120)}")
+            else:
+                page_name = data.get("name", "?")
+                # Check IG publishing permissions
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r2 = await client.get(
+                        f"https://graph.facebook.com/v25.0/{config.instagram_user_id}",
+                        params={"fields": "id,username", "access_token": token},
+                    )
+                ig_data = r2.json()
+                if "error" in ig_data:
+                    ig_err = ig_data["error"].get("message", "Unknown")
+                    lines.append(
+                        f"Meta API: token OK (page: {page_name}) — "
+                        f"IG permissions: INSUFFICIENT — {_truncate(ig_err, 80)}"
+                    )
+                else:
+                    ig_user = ig_data.get("username", ig_data.get("id", "?"))
+                    lines.append(
+                        f"Meta API: OK — page: {page_name}, IG: @{ig_user}"
+                    )
+    except Exception as exc:
+        lines.append(f"Meta API: FAIL — {_truncate(str(exc), 120)}")
+
+    await ctx.send("```\n" + "\n".join(lines) + "\n```")
+
+
+async def cmd_runstock(ctx: commands.Context) -> None:
+    """Handle !runstock — pipeline run using only stock photos (no AI image gen)."""
+    bot = ctx.bot
+    bot_data = bot.bot_data
+    channel_id = ctx.channel.id
+
+    acct_ctx = _get_account_context(bot_data, channel_id)
+    if acct_ctx is None:
+        await ctx.send("No account is configured for this channel.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+    dry_run: bool = acct_ctx["dry_run"]
+
+    pending = await get_pending_draft(db_path, config.account_id)
+    if pending is not None:
+        await ctx.send(
+            "A draft is already pending. Use !approve, !skip, or wait for auto-publish."
+        )
+        return
+
+    pipeline_key = f"pipeline_running_{config.account_id}"
+    if bot_data.get(pipeline_key):
+        await ctx.send("A pipeline run is already in progress.")
+        return
+
+    bot_data[pipeline_key] = True
+    await ctx.send(f"[{config.account_id}] Starting pipeline run (stock images only)...")
+
+    try:
+        suggest_key = f"suggested_topic_{config.account_id}"
+        user_hint = bot_data.pop(suggest_key, None)
+
+        result: PipelineResult = await run_pipeline(
+            config=config,
+            db_path=db_path,
+            user_hint=user_hint,
+            dry_run=dry_run,
+            stock_only=True,
+        )
+
+        if result.error:
+            await send_pipeline_error(bot, channel_id, result.error)
+            return
+
+        if result.success:
+            await send_draft_for_review(bot, channel_id, result, bot_data)
+        elif result.review and result.review.status == "FAIL":
+            await send_draft_for_review(bot, channel_id, result, bot_data)
+            await send_escalation(bot, channel_id, result)
+        else:
+            await ctx.send(
+                "Pipeline completed but produced no publishable result."
+            )
+
+    except Exception as exc:
+        logger.error("Pipeline run failed: %s", exc, exc_info=True)
+        await send_pipeline_error(bot, channel_id, str(exc))
+
+    finally:
+        bot_data[pipeline_key] = False
 
 
 async def cmd_run(ctx: commands.Context) -> None:
@@ -1186,7 +1362,9 @@ def build_bot(
 
     # Register command handlers
     bot.command(name="start")(cmd_start)
+    bot.command(name="check")(cmd_check)
     bot.command(name="run")(cmd_run)
+    bot.command(name="runstock")(cmd_runstock)
     bot.command(name="approve")(cmd_approve)
     bot.command(name="approve_anyway")(cmd_approve_anyway)
     bot.command(name="skip")(cmd_skip)
