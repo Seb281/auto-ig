@@ -195,6 +195,7 @@ async def _upsert_schedule_config(
     frequency: str | None = None,
     preferred_time: str | None = None,
     paused: int | None = None,
+    auto_publish: int | None = None,
     timezone: str = "UTC",
 ) -> None:
     """Insert or update the schedule_config for an account."""
@@ -210,8 +211,8 @@ async def _upsert_schedule_config(
             await db.execute(
                 """
                 INSERT INTO schedule_config
-                    (account_id, frequency, preferred_time, timezone, paused)
-                VALUES (?, ?, ?, ?, ?)
+                    (account_id, frequency, preferred_time, timezone, paused, auto_publish)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
@@ -219,6 +220,7 @@ async def _upsert_schedule_config(
                     preferred_time or "08:00",
                     timezone,
                     paused if paused is not None else 0,
+                    auto_publish if auto_publish is not None else 0,
                 ),
             )
         else:
@@ -236,6 +238,11 @@ async def _upsert_schedule_config(
                 await db.execute(
                     "UPDATE schedule_config SET paused = ? WHERE account_id = ?",
                     (paused, account_id),
+                )
+            if auto_publish is not None:
+                await db.execute(
+                    "UPDATE schedule_config SET auto_publish = ? WHERE account_id = ?",
+                    (auto_publish, account_id),
                 )
 
         await db.commit()
@@ -301,6 +308,12 @@ async def _do_publish_draft(
     dry_run: bool = acct_ctx["dry_run"]
     draft_id = draft["id"]
 
+    # Guard: re-check draft status to prevent double-publish race
+    current = await get_pending_draft(db_path, config.account_id)
+    if current is None or current["id"] != draft_id or current["status"] != "pending":
+        logger.info("Draft %d is no longer pending — publish aborted.", draft_id)
+        return
+
     caption = draft["caption"]
     hashtags = json.loads(draft["hashtags"])
     alt_text = draft["alt_text"]
@@ -315,6 +328,18 @@ async def _do_publish_draft(
     if channel is None:
         logger.error("Channel %d not found — cannot publish draft %d.", channel_id, draft_id)
         return
+
+    # Guard: block duplicate images at publish time
+    if image_phash:
+        from utils.image_utils import is_duplicate_image
+
+        if await is_duplicate_image(image_phash, db_path, config.account_id):
+            logger.warning("Draft %d blocked — duplicate image detected at publish time.", draft_id)
+            await _update_draft_status(db_path, draft_id, "skipped")
+            await channel.send(
+                content=f"Draft #{draft_id} blocked — image is too similar to a previous post. Use !run to generate a new one.",
+            )
+            return
 
     try:
         if dry_run:
@@ -352,6 +377,7 @@ async def _do_publish_draft(
 
     except Exception as exc:
         logger.error("Publish failed for draft %d: %s", draft_id, exc, exc_info=True)
+        await _update_draft_status(db_path, draft_id, "failed")
         await channel.send(content=f"Publish failed: {exc}")
 
     finally:
@@ -467,7 +493,15 @@ async def send_draft_for_review(
     # Load the draft back so we have the full row
     draft = await get_pending_draft(db_path, config.account_id)
     if draft is not None:
-        _start_auto_publish_timer(acct_ctx, bot_data, draft, channel_id, bot)
+        sched = await _get_schedule_config(db_path, config.account_id)
+        if sched and sched["auto_publish"]:
+            _start_auto_publish_timer(acct_ctx, bot_data, draft, channel_id, bot)
+        else:
+            logger.info(
+                "Auto-publish is off for '%s' — draft %d awaits manual action.",
+                config.account_id,
+                draft["id"],
+            )
 
 
 async def send_escalation(
@@ -530,6 +564,7 @@ async def cmd_start(ctx: commands.Context) -> None:
         "!suggest <topic> — queue a topic for the next run\n"
         "!pause — pause the scheduler\n"
         "!resume — resume the scheduler\n"
+        "!autopublish — toggle auto-publish on/off\n"
         "!setfrequency <value> — change posting schedule\n"
     )
 
@@ -983,10 +1018,12 @@ async def cmd_status(ctx: commands.Context) -> None:
         lines.append(f"Frequency: {sched['frequency']}")
         lines.append(f"Preferred time: {sched['preferred_time']}")
         lines.append(f"Paused: {'Yes' if sched['paused'] else 'No'}")
+        lines.append(f"Auto-publish: {'On' if sched.get('auto_publish') else 'Off'}")
     else:
         lines.append(f"Frequency: {config.post_frequency} (default)")
         lines.append(f"Preferred time: {config.preferred_time} (default)")
         lines.append("Paused: No")
+        lines.append("Auto-publish: Off")
 
     scheduler = bot_data.get("scheduler")
     if scheduler is not None:
@@ -1080,6 +1117,29 @@ async def cmd_resume(ctx: commands.Context) -> None:
             logger.info("Scheduler job '%s' resumed via !resume command.", job_id)
 
     await ctx.send(f"[{config.account_id}] Scheduler resumed.")
+
+
+async def cmd_autopublish(ctx: commands.Context) -> None:
+    """Handle !autopublish — toggle auto-publish for this account."""
+    bot_data = ctx.bot.bot_data
+    channel_id = ctx.channel.id
+
+    acct_ctx = _get_account_context(bot_data, channel_id)
+    if acct_ctx is None:
+        await ctx.send("No account is configured for this channel.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+
+    sched = await _get_schedule_config(db_path, config.account_id)
+    current = sched["auto_publish"] if sched else 0
+    new_value = 0 if current else 1
+
+    await _upsert_schedule_config(db_path, config.account_id, auto_publish=new_value, timezone=config.timezone)
+
+    state = "enabled" if new_value else "disabled"
+    await ctx.send(f"[{config.account_id}] Auto-publish {state}.")
 
 
 async def _reschedule_from_db(
@@ -1280,6 +1340,20 @@ async def _resume_overdue_drafts(bot: commands.Bot) -> None:
             logger.error("Channel %d not found — cannot resume draft for '%s'.", channel_id, config.account_id)
             continue
 
+        sched = await _get_schedule_config(db_path, config.account_id)
+        auto_pub = sched["auto_publish"] if sched else 0
+
+        if not auto_pub:
+            logger.info(
+                "Auto-publish is off for '%s' — draft %d still pending.",
+                config.account_id,
+                draft["id"],
+            )
+            await channel.send(
+                content=f"[{config.account_id}] Draft #{draft['id']} is still pending. Use !approve, !skip, or !regenerate.",
+            )
+            continue
+
         if now >= publish_at:
             logger.info(
                 "Overdue draft %d found for '%s' (publish_at=%s). Auto-publishing now.",
@@ -1388,6 +1462,7 @@ def build_bot(
     bot.command(name="suggest")(cmd_suggest)
     bot.command(name="pause")(cmd_pause)
     bot.command(name="resume")(cmd_resume)
+    bot.command(name="autopublish")(cmd_autopublish)
     bot.command(name="setfrequency")(cmd_setfrequency)
 
     # on_ready: resume overdue drafts

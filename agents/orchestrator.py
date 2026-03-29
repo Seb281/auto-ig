@@ -8,7 +8,6 @@ from agents.caption_writer import generate_caption
 from agents.content_planner import generate_brief
 from agents.image_sourcing import source_image
 from agents.reviewer import review_post
-from publisher.instagram import publish_post, save_post_record
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
@@ -122,41 +121,17 @@ async def run_pipeline(
                 logger.info("No retry_type specified — regenerating caption.")
                 caption = await generate_caption(config, brief)
 
-        # Step 5: Publish (if review passed)
-        media_id: str | None = None
+        # Determine review outcome — actual publishing is handled by the
+        # Discord approval layer (_do_publish_draft), NOT here.
         review_passed = review is not None and review.status == "PASS"
 
-        if review_passed:
-            full_caption_text = (
-                caption.caption
-                + "\n\n"
-                + " ".join(f"#{h}" for h in caption.hashtags)
-            )
-
-            if dry_run:
-                logger.info("[DRY RUN] Skipping publish step.")
-            else:
-                media_id = await publish_post(
-                    config, image.local_path, full_caption_text, caption.alt_text
-                )
-
-            # Record to post_history on successful publish or dry-run pass
-            await save_post_record(
-                db_path=db_path,
-                account_id=config.account_id,
-                topic=brief.topic,
-                content_pillar=brief.content_pillar,
-                image_phash=image.phash,
-                caption=full_caption_text,
-                instagram_media_id=media_id,
-            )
-        else:
-            logger.warning("Reviewer did not pass — skipping publish.")
+        if not review_passed:
+            logger.warning("Reviewer did not pass — content will be escalated.")
 
         logger.info("Pipeline complete.")
         return PipelineResult(
             success=review_passed,
-            post_id=media_id,
+            post_id=None,
             brief=brief,
             image=image,
             caption=caption,

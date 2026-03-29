@@ -194,10 +194,19 @@ async def init_db(db_path: str) -> None:
                 frequency TEXT NOT NULL DEFAULT '1d',
                 preferred_time TEXT NOT NULL DEFAULT '08:00',
                 timezone TEXT NOT NULL DEFAULT 'America/New_York',
-                paused INTEGER NOT NULL DEFAULT 0
+                paused INTEGER NOT NULL DEFAULT 0,
+                auto_publish INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+
+        # Migration: add auto_publish column if missing (existing DBs)
+        cursor = await db.execute("PRAGMA table_info(schedule_config)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "auto_publish" not in columns:
+            await db.execute(
+                "ALTER TABLE schedule_config ADD COLUMN auto_publish INTEGER NOT NULL DEFAULT 0"
+            )
 
         await db.commit()
 
