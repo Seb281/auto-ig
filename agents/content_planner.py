@@ -10,6 +10,9 @@ from utils.prompts import _extract_json, build_planner_prompt
 
 logger = logging.getLogger(__name__)
 
+# Valid content types
+_VALID_CONTENT_TYPES = {"single_image", "carousel"}
+
 
 def _normalize_pillar(raw: str) -> str:
     """Normalize a content pillar value for comparison (lowercase, underscores)."""
@@ -89,17 +92,28 @@ async def generate_brief(
         visual_keywords = [str(data.get("topic", "food"))]
     visual_keywords = [str(kw) for kw in visual_keywords]
 
+    # Validate content_type
+    content_type = str(data.get("content_type", "single_image")).strip().lower()
+    if content_type not in _VALID_CONTENT_TYPES:
+        logger.warning(
+            "AI returned unknown content_type '%s'. Defaulting to 'single_image'.",
+            content_type,
+        )
+        content_type = "single_image"
+
     brief = PlannerBrief(
         topic=str(data.get("topic", "")),
         angle=str(data.get("angle", "")),
         visual_keywords=visual_keywords,
         mood=str(data.get("mood", "")),
         content_pillar=content_pillar,
+        content_type=content_type,
     )
 
     logger.info(
-        "Brief generated — topic: '%s', pillar: '%s'",
+        "Brief generated — topic: '%s', pillar: '%s', content_type: '%s'",
         brief.topic,
         brief.content_pillar,
+        brief.content_type,
     )
     return brief

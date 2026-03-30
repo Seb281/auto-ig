@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 # Maximum number of stock photo candidates to score with vision
 MAX_CANDIDATES_TO_SCORE = 3
 
+# Carousel image count range
+CAROUSEL_MIN_IMAGES = 3
+CAROUSEL_MAX_IMAGES = 5
+
 # Map source name to search function
 _SEARCH_FUNCTIONS = {
     "unsplash": search_unsplash,
@@ -269,6 +273,142 @@ async def source_image(
                 try:
                     os.remove(tf)
                     logger.debug("Cleaned up temp file on error: %s", tf)
+                except OSError:
+                    pass
+        raise
+
+
+async def source_carousel_images(
+    config: AccountConfig,
+    brief: PlannerBrief,
+    db_path: str,
+    media_dir: str,
+    stock_only: bool = False,
+) -> list[ImageResult]:
+    """Source 3-5 images for a carousel post, each scored independently."""
+    os.makedirs(media_dir, exist_ok=True)
+    temp_files: list[str] = []
+    accepted_images: list[ImageResult] = []
+
+    try:
+        # Search for stock photos (request more results for carousel)
+        stock_results = await _search_stock_photos(config, brief)
+
+        # Score and collect candidates — we need more than for single image
+        max_candidates = CAROUSEL_MAX_IMAGES * 2  # Score extra to have fallbacks
+        candidates_to_score = stock_results[:max_candidates]
+
+        scored_candidates: list[tuple[str, float, str]] = []  # (path, score, source)
+
+        for i, photo in enumerate(candidates_to_score):
+            candidate_filename = f"carousel_candidate_{i}_{uuid.uuid4().hex[:8]}.jpg"
+            candidate_path = os.path.join(media_dir, candidate_filename)
+
+            try:
+                await download_image(photo.url, candidate_path)
+                temp_files.append(candidate_path)
+            except ConnectionError as exc:
+                logger.warning("Failed to download carousel candidate %d: %s", i, exc)
+                continue
+
+            score = await _score_candidate(candidate_path, config, brief)
+
+            # In stock_only mode, accept any photo; otherwise require threshold
+            threshold = (
+                config.image_sourcing.stock_score_threshold
+                if not stock_only
+                else 0.0
+            )
+            if score >= threshold:
+                scored_candidates.append((candidate_path, score, photo.source))
+
+        # Sort by score descending and take the top CAROUSEL_MAX_IMAGES
+        scored_candidates.sort(key=lambda x: x[1], reverse=True)
+        top_candidates = scored_candidates[:CAROUSEL_MAX_IMAGES]
+
+        for candidate_path, score, source in top_candidates:
+            resized_filename = f"carousel_resized_{uuid.uuid4().hex[:8]}.jpg"
+            resized_path = os.path.join(media_dir, resized_filename)
+            await resize_for_instagram(candidate_path, resized_path)
+
+            phash = compute_phash(resized_path)
+
+            # Check for duplicate against post_history
+            is_dup = await is_duplicate_image(phash, db_path, config.account_id)
+            if is_dup:
+                logger.info("Carousel candidate is a duplicate — skipping.")
+                if os.path.exists(resized_path):
+                    os.remove(resized_path)
+                continue
+
+            accepted_images.append(
+                ImageResult(
+                    local_path=resized_path,
+                    source=source,
+                    phash=phash,
+                    score=score,
+                )
+            )
+
+        # Fill remaining slots with AI-generated images if needed
+        if not stock_only:
+            while len(accepted_images) < CAROUSEL_MIN_IMAGES:
+                logger.info(
+                    "Carousel has %d images, need %d — generating AI image.",
+                    len(accepted_images),
+                    CAROUSEL_MIN_IMAGES,
+                )
+                generated_path = await _generate_ai_image(config, brief, media_dir)
+                temp_files.append(generated_path)
+
+                resized_filename = f"carousel_gen_resized_{uuid.uuid4().hex[:8]}.jpg"
+                resized_path = os.path.join(media_dir, resized_filename)
+                await resize_for_instagram(generated_path, resized_path)
+
+                phash = compute_phash(resized_path)
+
+                # Clean up raw generated file
+                if os.path.exists(generated_path):
+                    os.remove(generated_path)
+
+                accepted_images.append(
+                    ImageResult(
+                        local_path=resized_path,
+                        source="gemini",
+                        phash=phash,
+                        score=0.5,
+                    )
+                )
+
+        if len(accepted_images) < CAROUSEL_MIN_IMAGES:
+            raise RuntimeError(
+                f"Could not source enough images for carousel: "
+                f"got {len(accepted_images)}, need at least {CAROUSEL_MIN_IMAGES}."
+            )
+
+        # Clean up temp files that are not part of accepted images
+        accepted_paths = {img.local_path for img in accepted_images}
+        for tf in temp_files:
+            if tf not in accepted_paths and os.path.exists(tf):
+                os.remove(tf)
+                logger.debug("Cleaned up carousel temp file: %s", tf)
+
+        logger.info("Carousel sourcing complete: %d images.", len(accepted_images))
+        return accepted_images
+
+    except Exception:
+        # Clean up all temp files and accepted images on failure
+        accepted_paths = {img.local_path for img in accepted_images}
+        for tf in temp_files:
+            if os.path.exists(tf):
+                try:
+                    os.remove(tf)
+                except OSError:
+                    pass
+        for img in accepted_images:
+            if os.path.exists(img.local_path):
+                try:
+                    os.remove(img.local_path)
                 except OSError:
                     pass
         raise

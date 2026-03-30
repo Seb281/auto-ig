@@ -27,7 +27,7 @@ async def publish_post(
     caption_text: str,
     alt_text: str,
 ) -> str:
-    """Publish an image to Instagram via the Meta Graph API and return the media ID."""
+    """Publish a single image to Instagram via the Meta Graph API and return the media ID."""
     # Retrieve access token from environment
     token = os.getenv(config.access_token_env)
     if not token:
@@ -54,6 +54,64 @@ async def publish_post(
                 client, config.instagram_user_id, token, container_id
             )
             logger.info("Published to Instagram — media ID: %s", media_id)
+
+    return media_id
+
+
+async def publish_carousel(
+    config: AccountConfig,
+    image_paths: list[str],
+    caption_text: str,
+    alt_text: str,
+) -> str:
+    """Publish a carousel post to Instagram via the Meta Graph API and return the media ID."""
+    token = os.getenv(config.access_token_env)
+    if not token:
+        raise ValueError(
+            f"Instagram access token env var '{config.access_token_env}' is missing or empty."
+        )
+
+    if len(image_paths) < 2:
+        raise ValueError("Carousel requires at least 2 images.")
+
+    server = TempImageServer(image_paths, config.temp_http_port)
+    with server:
+        logger.info(
+            "Serving %d carousel images — starting Meta Graph API carousel publish flow.",
+            len(image_paths),
+        )
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Step 1: Create child containers for each image
+            child_ids: list[str] = []
+            for i, img_path in enumerate(image_paths):
+                image_url = server.get_url(img_path)
+                child_id = await _create_carousel_child(
+                    client, config.instagram_user_id, token, image_url
+                )
+                logger.info("Carousel child %d/%d created: %s", i + 1, len(image_paths), child_id)
+                child_ids.append(child_id)
+
+            # Step 2: Poll each child container until ready
+            for i, child_id in enumerate(child_ids):
+                await _poll_container_status(client, child_id, token)
+                logger.info("Carousel child %d/%d ready.", i + 1, len(child_ids))
+
+            # Step 3: Create parent carousel container
+            parent_id = await _create_carousel_parent(
+                client, config.instagram_user_id, token, child_ids, caption_text
+            )
+            logger.info("Carousel parent container created: %s", parent_id)
+
+            # Step 4: Poll parent container
+            await _poll_container_status(client, parent_id, token)
+            logger.info("Carousel parent container ready for publishing.")
+
+            # Step 5: Publish the carousel
+            media_id = await _publish_container(
+                client, config.instagram_user_id, token, parent_id
+            )
+            logger.info("Carousel published to Instagram — media ID: %s", media_id)
 
     return media_id
 
@@ -99,6 +157,84 @@ async def _create_container(
     container_id = data.get("id")
     if not container_id:
         raise RuntimeError(f"Meta API returned no container ID. Response: {data}")
+
+    return container_id
+
+
+async def _create_carousel_child(
+    client: httpx.AsyncClient,
+    ig_user_id: str,
+    token: str,
+    image_url: str,
+) -> str:
+    """Create a carousel child container (is_carousel_item=true)."""
+    url = f"{_GRAPH_API_BASE}/{ig_user_id}/media"
+    params: dict[str, str] = {
+        "image_url": image_url,
+        "is_carousel_item": "true",
+        "access_token": token,
+    }
+
+    try:
+        response = await client.post(url, data=params)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text
+        raise RuntimeError(
+            f"Meta API error creating carousel child (HTTP {exc.response.status_code}): {body}"
+        ) from exc
+
+    data = response.json()
+    if "error" in data:
+        err = data["error"]
+        raise RuntimeError(
+            f"Meta API error creating carousel child: {err.get('message', 'Unknown')} "
+            f"(code {err.get('code', '?')})"
+        )
+
+    container_id = data.get("id")
+    if not container_id:
+        raise RuntimeError(f"Meta API returned no carousel child ID. Response: {data}")
+
+    return container_id
+
+
+async def _create_carousel_parent(
+    client: httpx.AsyncClient,
+    ig_user_id: str,
+    token: str,
+    child_ids: list[str],
+    caption: str,
+) -> str:
+    """Create a carousel parent container with children."""
+    url = f"{_GRAPH_API_BASE}/{ig_user_id}/media"
+    params: dict[str, str] = {
+        "media_type": "CAROUSEL",
+        "children": ",".join(child_ids),
+        "caption": caption,
+        "access_token": token,
+    }
+
+    try:
+        response = await client.post(url, data=params)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text
+        raise RuntimeError(
+            f"Meta API error creating carousel parent (HTTP {exc.response.status_code}): {body}"
+        ) from exc
+
+    data = response.json()
+    if "error" in data:
+        err = data["error"]
+        raise RuntimeError(
+            f"Meta API error creating carousel parent: {err.get('message', 'Unknown')} "
+            f"(code {err.get('code', '?')})"
+        )
+
+    container_id = data.get("id")
+    if not container_id:
+        raise RuntimeError(f"Meta API returned no carousel parent ID. Response: {data}")
 
     return container_id
 

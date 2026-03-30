@@ -27,11 +27,13 @@ import httpx
 from agents import PipelineResult, PlannerBrief
 from agents.orchestrator import run_pipeline
 from agents.reviewer import STATUS_FAIL
-from publisher.instagram import publish_post, save_post_record
+from publisher.instagram import publish_post, publish_carousel, save_post_record
+from publisher.facebook import publish_photo_to_facebook, publish_carousel_to_facebook
 from publisher.scheduler import get_next_run_time, pipeline_job_id, schedule_pipeline_job
 from utils.ai_client import generate_text, generate_image
 from utils.config_loader import AccountConfig
 from utils.image_utils import is_duplicate_image
+from utils.prompts import build_facebook_caption
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +70,12 @@ def _format_draft_caption(caption: str, hashtags: list[str]) -> str:
     return f"{caption}\n\n{tag_line}" if tag_line else caption
 
 
-def _format_draft_preview(caption: str, hashtags: list[str]) -> str:
+def _format_draft_preview(caption: str, hashtags: list[str], content_type: str = "single_image") -> str:
     """Build a human-readable draft preview for Discord."""
     full = _format_draft_caption(caption, hashtags)
+    type_label = "CAROUSEL" if content_type == "carousel" else "SINGLE IMAGE"
     lines = [
-        "--- DRAFT PREVIEW ---",
+        f"--- DRAFT PREVIEW ({type_label}) ---",
         "",
         full,
         "",
@@ -140,6 +143,7 @@ async def _save_pending_draft(
     alt_text: str,
     brief: PlannerBrief,
     timeout_hours: int,
+    content_type: str = "single_image",
 ) -> int:
     """Insert a new pending draft and return its row ID."""
     now = datetime.now(timezone.utc)
@@ -150,8 +154,8 @@ async def _save_pending_draft(
             """
             INSERT INTO pending_drafts
                 (account_id, image_path, image_phash, caption, hashtags, alt_text,
-                 brief_json, created_at, publish_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                 brief_json, created_at, publish_at, status, content_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
                 account_id,
@@ -163,14 +167,16 @@ async def _save_pending_draft(
                 json.dumps(asdict(brief)),
                 now.isoformat(),
                 publish_at.isoformat(),
+                content_type,
             ),
         )
         await db.commit()
         draft_id = cursor.lastrowid
 
     logger.info(
-        "Pending draft saved — id=%d, publish_at=%s",
+        "Pending draft saved — id=%d, content_type=%s, publish_at=%s",
         draft_id,
+        content_type,
         publish_at.isoformat(),
     )
     return draft_id
@@ -323,6 +329,7 @@ async def _do_publish_draft(
     image_path = draft["image_path"]
     image_phash = draft.get("image_phash", "")
     brief_data = json.loads(draft["brief_json"])
+    content_type = draft.get("content_type", "single_image")
 
     full_caption = _format_draft_caption(caption, hashtags)
 
@@ -332,8 +339,20 @@ async def _do_publish_draft(
         logger.error("Channel %d not found — cannot publish draft %d.", channel_id, draft_id)
         return
 
+    # Determine image paths — carousel uses JSON array, single uses plain path
+    if content_type == "carousel":
+        try:
+            image_paths = json.loads(image_path)
+        except (json.JSONDecodeError, TypeError):
+            image_paths = [image_path]
+        # Use first image phash for duplicate check
+        primary_phash = image_phash.split(",")[0] if image_phash else ""
+    else:
+        image_paths = [image_path]
+        primary_phash = image_phash
+
     # Guard: block duplicate images at publish time
-    if image_phash and await is_duplicate_image(image_phash, db_path, config.account_id):
+    if primary_phash and await is_duplicate_image(primary_phash, db_path, config.account_id):
         logger.warning("Draft %d blocked — duplicate image detected at publish time.", draft_id)
         await _update_draft_status(db_path, draft_id, "skipped")
         await channel.send(
@@ -341,23 +360,52 @@ async def _do_publish_draft(
         )
         return
 
+    published_platforms: list[str] = []
+    media_id: str | None = None
+
     try:
         if dry_run:
             logger.info("[DRY RUN] Skipping publish for draft %d.", draft_id)
             media_id = None
             prefix = "[DRY RUN] "
+            published_platforms = list(config.platforms)
         else:
-            media_id = await publish_post(
-                config, image_path, full_caption, alt_text
-            )
+            # Publish to Instagram
+            if content_type == "carousel" and len(image_paths) >= 2:
+                media_id = await publish_carousel(
+                    config, image_paths, full_caption, alt_text
+                )
+            else:
+                media_id = await publish_post(
+                    config, image_paths[0], full_caption, alt_text
+                )
+            published_platforms.append("instagram")
             prefix = ""
+
+            # Publish to Facebook if configured
+            if "facebook" in config.platforms and config.facebook_page_id:
+                try:
+                    fb_caption = build_facebook_caption(caption, hashtags)
+                    if content_type == "carousel" and len(image_paths) >= 2:
+                        fb_post_id = await publish_carousel_to_facebook(
+                            config, image_paths, fb_caption
+                        )
+                    else:
+                        fb_post_id = await publish_photo_to_facebook(
+                            config, image_paths[0], fb_caption
+                        )
+                    published_platforms.append("facebook")
+                    logger.info("Also published to Facebook — post ID: %s", fb_post_id)
+                except Exception as fb_exc:
+                    logger.error("Facebook publish failed: %s", fb_exc, exc_info=True)
+                    # Don't fail the whole publish if Facebook fails
 
         await save_post_record(
             db_path=db_path,
             account_id=config.account_id,
             topic=brief_data.get("topic", "Unknown"),
             content_pillar=brief_data.get("content_pillar", ""),
-            image_phash=image_phash,
+            image_phash=primary_phash,
             caption=full_caption,
             instagram_media_id=media_id,
         )
@@ -365,11 +413,12 @@ async def _do_publish_draft(
         await _update_draft_status(db_path, draft_id, "published")
 
         source = "Auto-published" if auto else "Published"
-        msg = f"{prefix}{source} successfully."
+        platform_str = ", ".join(published_platforms) if published_platforms else "none"
+        msg = f"{prefix}{source} successfully to: {platform_str}."
         if media_id:
-            msg += f"\nMedia ID: {media_id}"
+            msg += f"\nInstagram Media ID: {media_id}"
         await channel.send(content=msg)
-        logger.info("%s draft %d.", source, draft_id)
+        logger.info("%s draft %d to %s.", source, draft_id, platform_str)
 
     except Exception as exc:
         logger.error("Publish failed for draft %d: %s", draft_id, exc, exc_info=True)
@@ -377,12 +426,13 @@ async def _do_publish_draft(
         await channel.send(content=f"Publish failed: {exc}")
 
     finally:
-        if image_path and os.path.exists(image_path):
-            try:
-                os.remove(image_path)
-                logger.info("Cleaned up draft image: %s", image_path)
-            except OSError as exc:
-                logger.warning("Failed to clean up image %s: %s", image_path, exc)
+        for path in image_paths:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    logger.info("Cleaned up draft image: %s", path)
+                except OSError as exc:
+                    logger.warning("Failed to clean up image %s: %s", path, exc)
 
     task_key = _auto_publish_task_key(config.account_id)
     bot_data.pop(task_key, None)
@@ -437,45 +487,89 @@ async def send_draft_for_review(
         logger.error("Channel %d not found — cannot send draft for review.", channel_id)
         return
 
-    if result.image is None or result.caption is None or result.brief is None:
+    if result.caption is None or result.brief is None:
         await channel.send(
             content="Pipeline produced an incomplete result — cannot send draft for review.",
         )
         return
 
-    # Copy image to a draft-specific path, then clean up the pipeline's original
+    # Determine content type and image list
+    content_type = result.brief.content_type if result.brief else "single_image"
+    is_carousel = content_type == "carousel" and len(result.images) > 1
+
+    # Copy image(s) to draft-specific paths
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     media_dir = os.path.join(base_dir, "storage", "media")
     os.makedirs(media_dir, exist_ok=True)
-    draft_image_path = os.path.join(
-        media_dir, f"draft_{os.path.basename(result.image.local_path)}"
-    )
-    await asyncio.to_thread(shutil.copy2, result.image.local_path, draft_image_path)
-    # Clean up the original pipeline image now that we have our copy
-    if os.path.exists(result.image.local_path):
-        os.remove(result.image.local_path)
+
+    draft_image_paths: list[str] = []
+    all_phashes: list[str] = []
+
+    if is_carousel:
+        for i, img in enumerate(result.images):
+            draft_path = os.path.join(
+                media_dir, f"draft_carousel_{i}_{os.path.basename(img.local_path)}"
+            )
+            await asyncio.to_thread(shutil.copy2, img.local_path, draft_path)
+            draft_image_paths.append(draft_path)
+            all_phashes.append(img.phash)
+            # Clean up original
+            if os.path.exists(img.local_path):
+                os.remove(img.local_path)
+    else:
+        if result.image is None:
+            await channel.send(
+                content="Pipeline produced no image — cannot send draft for review.",
+            )
+            return
+        draft_path = os.path.join(
+            media_dir, f"draft_{os.path.basename(result.image.local_path)}"
+        )
+        await asyncio.to_thread(shutil.copy2, result.image.local_path, draft_path)
+        draft_image_paths.append(draft_path)
+        all_phashes.append(result.image.phash)
+        # Clean up original
+        if os.path.exists(result.image.local_path):
+            os.remove(result.image.local_path)
+
+    # For database storage: carousel stores JSON array, single stores plain path
+    if is_carousel:
+        db_image_path = json.dumps(draft_image_paths)
+        db_image_phash = ",".join(all_phashes)
+    else:
+        db_image_path = draft_image_paths[0]
+        db_image_phash = all_phashes[0] if all_phashes else ""
 
     # Save to pending_drafts
     draft_id = await _save_pending_draft(
         db_path=db_path,
         account_id=config.account_id,
-        image_path=draft_image_path,
-        image_phash=result.image.phash,
+        image_path=db_image_path,
+        image_phash=db_image_phash,
         caption=result.caption.caption,
         hashtags=result.caption.hashtags,
         alt_text=result.caption.alt_text,
         brief=result.brief,
         timeout_hours=config.auto_publish_timeout_hours,
+        content_type=content_type,
     )
 
-    # Send image
+    # Send image(s)
     try:
-        photo_bytes = await asyncio.to_thread(_read_file_bytes, draft_image_path)
-        file = discord.File(io.BytesIO(photo_bytes), filename="draft.jpg")
-        await channel.send(
-            content=f"[{config.account_id}] Draft #{draft_id} ready for review",
-            file=file,
-        )
+        if is_carousel:
+            # Send all carousel images
+            for i, path in enumerate(draft_image_paths):
+                photo_bytes = await asyncio.to_thread(_read_file_bytes, path)
+                file = discord.File(io.BytesIO(photo_bytes), filename=f"draft_slide_{i + 1}.jpg")
+                label = f"[{config.account_id}] Draft #{draft_id} — Slide {i + 1}/{len(draft_image_paths)}"
+                await channel.send(content=label, file=file)
+        else:
+            photo_bytes = await asyncio.to_thread(_read_file_bytes, draft_image_paths[0])
+            file = discord.File(io.BytesIO(photo_bytes), filename="draft.jpg")
+            await channel.send(
+                content=f"[{config.account_id}] Draft #{draft_id} ready for review",
+                file=file,
+            )
     except Exception as exc:
         logger.error("Failed to send draft photo: %s", exc)
         await channel.send(
@@ -483,7 +577,12 @@ async def send_draft_for_review(
         )
 
     # Send caption preview
-    preview = _format_draft_preview(result.caption.caption, result.caption.hashtags)
+    preview = _format_draft_preview(result.caption.caption, result.caption.hashtags, content_type)
+
+    # Show platforms info
+    platforms = ", ".join(config.platforms)
+    preview += f"\nPlatforms: {platforms}"
+
     await channel.send(content=_truncate(preview))
 
     # Load the draft back so we have the full row
@@ -669,6 +768,31 @@ async def cmd_check(ctx: commands.Context) -> None:
     except Exception as exc:
         lines.append(f"Meta API: FAIL — {_truncate(str(exc), 120)}")
 
+    # 6. Facebook Pages (if configured)
+    if "facebook" in config.platforms and config.facebook_page_token_env:
+        try:
+            fb_token = os.getenv(config.facebook_page_token_env)
+            if not fb_token:
+                lines.append(f"Facebook: FAIL — {config.facebook_page_token_env} not set")
+            else:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(
+                        f"https://graph.facebook.com/v25.0/{config.facebook_page_id}",
+                        params={"fields": "id,name", "access_token": fb_token},
+                    )
+                fb_data = r.json()
+                if "error" in fb_data:
+                    fb_err = fb_data["error"].get("message", "Unknown")
+                    lines.append(f"Facebook: FAIL — {_truncate(fb_err, 120)}")
+                else:
+                    fb_name = fb_data.get("name", "?")
+                    lines.append(f"Facebook: OK — page: {fb_name}")
+        except Exception as exc:
+            lines.append(f"Facebook: FAIL — {_truncate(str(exc), 120)}")
+
+    # Show platforms
+    lines.append(f"\nPlatforms: {', '.join(config.platforms)}")
+
     await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
 
@@ -707,7 +831,7 @@ async def cmd_runstock(ctx: commands.Context) -> None:
         suggest_key = f"suggested_topic_{config.account_id}"
         user_hint = bot_data.pop(suggest_key, None)
 
-        result: PipelineResult = await run_pipeline(
+        result = await run_pipeline(
             config=config,
             db_path=db_path,
             user_hint=user_hint,
@@ -735,10 +859,11 @@ async def cmd_runstock(ctx: commands.Context) -> None:
 
     finally:
         bot_data[pipeline_key] = False
-        # Clean up pipeline image if send_draft_for_review didn't get to it
-        if result is not None and result.image and result.image.local_path:
-            if os.path.exists(result.image.local_path):
-                os.remove(result.image.local_path)
+        # Clean up pipeline images if send_draft_for_review didn't get to them
+        if result is not None:
+            for img in result.images:
+                if img.local_path and os.path.exists(img.local_path):
+                    os.remove(img.local_path)
 
 
 async def cmd_run(ctx: commands.Context) -> None:
@@ -803,10 +928,11 @@ async def cmd_run(ctx: commands.Context) -> None:
 
     finally:
         bot_data[pipeline_key] = False
-        # Clean up pipeline image if send_draft_for_review didn't get to it
-        if result is not None and result.image and result.image.local_path:
-            if os.path.exists(result.image.local_path):
-                os.remove(result.image.local_path)
+        # Clean up pipeline images if send_draft_for_review didn't get to them
+        if result is not None:
+            for img in result.images:
+                if img.local_path and os.path.exists(img.local_path):
+                    os.remove(img.local_path)
 
 
 async def cmd_approve(ctx: commands.Context) -> None:
@@ -869,12 +995,8 @@ async def cmd_skip(ctx: commands.Context) -> None:
 
     await _update_draft_status(db_path, draft["id"], "skipped")
 
-    image_path = draft.get("image_path", "")
-    if image_path and os.path.exists(image_path):
-        try:
-            os.remove(image_path)
-        except OSError:
-            pass
+    # Clean up image(s)
+    _cleanup_draft_images(draft)
 
     await ctx.send("Draft skipped. Use !run to generate a new one.")
 
@@ -901,13 +1023,7 @@ async def cmd_skip_today(ctx: commands.Context) -> None:
             bot_data.pop(task_key, None)
 
         await _update_draft_status(db_path, draft["id"], "skipped")
-
-        image_path = draft.get("image_path", "")
-        if image_path and os.path.exists(image_path):
-            try:
-                os.remove(image_path)
-            except OSError:
-                pass
+        _cleanup_draft_images(draft)
 
     await ctx.send("Today's post skipped. No regeneration.")
 
@@ -966,13 +1082,7 @@ async def cmd_regenerate(ctx: commands.Context) -> None:
             bot_data.pop(task_key, None)
 
         await _update_draft_status(db_path, draft["id"], "skipped")
-
-        image_path = draft.get("image_path", "")
-        if image_path and os.path.exists(image_path):
-            try:
-                os.remove(image_path)
-            except OSError:
-                pass
+        _cleanup_draft_images(draft)
 
     await ctx.send("Draft discarded. Starting fresh pipeline run...")
     await cmd_run(ctx)
@@ -1033,10 +1143,14 @@ async def cmd_status(ctx: commands.Context) -> None:
         lines.append("Next run: scheduler not active")
 
     lines.append("")
+    lines.append(f"Platforms: {', '.join(config.platforms)}")
+
+    lines.append("")
 
     draft = await get_pending_draft(db_path, config.account_id)
     if draft:
-        lines.append(f"Pending draft: #{draft['id']} (publish_at: {draft['publish_at']})")
+        ct = draft.get("content_type", "single_image")
+        lines.append(f"Pending draft: #{draft['id']} ({ct}, publish_at: {draft['publish_at']})")
     else:
         lines.append("No pending draft.")
 
@@ -1217,6 +1331,31 @@ async def cmd_setfrequency(ctx: commands.Context, value: str = "") -> None:
     await _upsert_schedule_config(db_path, config.account_id, frequency=value, timezone=config.timezone)
     await _reschedule_from_db(bot_data, db_path, config)
     await ctx.send(f"[{config.account_id}] Posting frequency changed to {value}.")
+
+
+# ---------------------------------------------------------------------------
+# Image cleanup helper
+# ---------------------------------------------------------------------------
+
+def _cleanup_draft_images(draft: dict) -> None:
+    """Clean up image file(s) associated with a draft."""
+    image_path = draft.get("image_path", "")
+    content_type = draft.get("content_type", "single_image")
+
+    if content_type == "carousel":
+        try:
+            paths = json.loads(image_path)
+        except (json.JSONDecodeError, TypeError):
+            paths = [image_path] if image_path else []
+    else:
+        paths = [image_path] if image_path else []
+
+    for path in paths:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
