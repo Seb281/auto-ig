@@ -193,3 +193,88 @@ async def review_post(
         reasons=all_reasons,
         retry_type=retry_type,
     )
+
+
+async def review_carousel_post(
+    config: AccountConfig,
+    brief: PlannerBrief,
+    images: list[ImageResult],
+    caption: CaptionResult,
+    db_path: str,
+) -> ReviewResult:
+    """Review a carousel post — check each image individually plus caption."""
+    all_reasons: list[str] = []
+    retry_type: str | None = None
+
+    # Check 1: Text-based banned topic check
+    logger.info("Checking carousel caption for banned topics...")
+    banned_violations = _check_caption_banned_topics(
+        caption.caption, caption.hashtags, config
+    )
+    if banned_violations:
+        all_reasons.extend(banned_violations)
+        retry_type = RETRY_CAPTION
+
+    # Check 2: Review each image individually
+    for i, image in enumerate(images):
+        slide_label = f"Slide {i + 1}/{len(images)}"
+
+        # Duplicate check
+        logger.info("Checking %s for duplicates...", slide_label)
+        try:
+            is_dup = await is_duplicate_image(
+                image.phash, db_path, config.account_id
+            )
+        except Exception as exc:
+            logger.warning("Duplicate check failed for %s: %s", slide_label, exc)
+            is_dup = False
+
+        if is_dup:
+            all_reasons.append(
+                f"{slide_label}: Image is too similar to a previously published post."
+            )
+            retry_type = RETRY_IMAGE
+
+        # Vision review
+        if os.path.exists(image.local_path):
+            try:
+                logger.info("Running vision review on %s...", slide_label)
+                vision_result = await _vision_review(
+                    image.local_path, config, brief, caption.caption
+                )
+                if vision_result.status == STATUS_FAIL:
+                    prefixed_reasons = [
+                        f"{slide_label}: {r}" for r in vision_result.reasons
+                    ]
+                    all_reasons.extend(prefixed_reasons)
+                    if retry_type != RETRY_IMAGE and vision_result.retry_type is not None:
+                        retry_type = vision_result.retry_type
+            except Exception as exc:
+                logger.warning(
+                    "Vision review failed for %s: %s. Proceeding.", slide_label, exc
+                )
+        else:
+            logger.warning(
+                "%s: Image not found at %s — skipping.", slide_label, image.local_path
+            )
+
+    # Final verdict
+    if all_reasons:
+        status = STATUS_FAIL
+        if retry_type is None:
+            retry_type = RETRY_CAPTION
+        logger.info(
+            "Carousel review FAILED with %d reason(s). Retry type: %s",
+            len(all_reasons),
+            retry_type,
+        )
+    else:
+        status = STATUS_PASS
+        retry_type = None
+        logger.info("Carousel review PASSED — all %d slides OK.", len(images))
+
+    return ReviewResult(
+        status=status,
+        reasons=all_reasons,
+        retry_type=retry_type,
+    )

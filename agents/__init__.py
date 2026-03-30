@@ -16,11 +16,12 @@ class PlannerBrief:
     visual_keywords: list[str]
     mood: str
     content_pillar: str
+    content_type: str = "single_image"  # "single_image" or "carousel"
 
 
 @dataclass
 class ImageResult:
-    """Output of the Image Sourcing agent."""
+    """Output of the Image Sourcing agent (single image)."""
 
     local_path: str
     source: str  # "user" | "unsplash" | "pexels" | "gemini"
@@ -58,3 +59,5 @@ class PipelineResult:
     review: ReviewResult | None
     error: str | None
     skipped: bool = field(default=False)
+    # Carousel support: list of ImageResult for multi-image posts
+    images: list[ImageResult] = field(default_factory=list)

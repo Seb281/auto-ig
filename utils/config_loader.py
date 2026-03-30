@@ -2,7 +2,7 @@
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import aiosqlite
 import yaml
@@ -45,6 +45,13 @@ class AccountConfig:
     content_pillars: list[str]
     image_sourcing: ImageSourcingConfig
     temp_http_port: int
+
+    # Publishing platforms — default is Instagram only
+    platforms: list[str] = field(default_factory=lambda: ["instagram"])
+
+    # Facebook Pages (optional — opt-in via platforms list)
+    facebook_page_id: str = ""
+    facebook_page_token_env: str = ""
 
 
 _REQUIRED_ACCOUNT_KEYS = [
@@ -109,6 +116,9 @@ def load_account_config(config_path: str) -> AccountConfig:
         fallback=str(img_raw["fallback"]),
     )
 
+    # Parse optional platforms list (default to ["instagram"])
+    platforms = list(raw.get("platforms", ["instagram"]))
+
     return AccountConfig(
         account_id=str(raw["account_id"]),
         instagram_user_id=str(raw["instagram_user_id"]),
@@ -128,6 +138,9 @@ def load_account_config(config_path: str) -> AccountConfig:
         content_pillars=list(raw["content_pillars"]),
         image_sourcing=image_sourcing,
         temp_http_port=int(raw["temp_http_port"]),
+        platforms=platforms,
+        facebook_page_id=str(raw.get("facebook_page_id", "")),
+        facebook_page_token_env=str(raw.get("facebook_page_token_env", "")),
     )
 
 
@@ -138,6 +151,10 @@ def validate_env_vars(config: AccountConfig) -> None:
         config.discord_bot_token_env,
         config.discord_channel_id_env,
     ]
+
+    # If Facebook is enabled, validate its token env var
+    if "facebook" in config.platforms and config.facebook_page_token_env:
+        required.append(config.facebook_page_token_env)
 
     missing = [var for var in required if not os.getenv(var)]
 
@@ -206,6 +223,22 @@ async def init_db(db_path: str) -> None:
         if "auto_publish" not in columns:
             await db.execute(
                 "ALTER TABLE schedule_config ADD COLUMN auto_publish INTEGER NOT NULL DEFAULT 0"
+            )
+
+        # Migration: add content_type column to pending_drafts if missing
+        cursor = await db.execute("PRAGMA table_info(pending_drafts)")
+        draft_columns = {row[1] for row in await cursor.fetchall()}
+        if "content_type" not in draft_columns:
+            await db.execute(
+                "ALTER TABLE pending_drafts ADD COLUMN content_type TEXT NOT NULL DEFAULT 'single_image'"
+            )
+
+        # Migration: add published_platforms column to post_history if missing
+        cursor = await db.execute("PRAGMA table_info(post_history)")
+        history_columns = {row[1] for row in await cursor.fetchall()}
+        if "published_platforms" not in history_columns:
+            await db.execute(
+                "ALTER TABLE post_history ADD COLUMN published_platforms TEXT NOT NULL DEFAULT 'instagram'"
             )
 
         await db.commit()

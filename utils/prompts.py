@@ -88,9 +88,13 @@ def build_planner_prompt(
         "Requirements:",
         "- content_pillar must be exactly one of: " + pillars,
         "- visual_keywords must contain 3–5 concrete, photographable nouns suitable for stock photo search",
+        '- content_type must be either "single_image" or "carousel"',
+        "  - Use carousel when the topic benefits from showing multiple angles, steps, or variations",
+        "    (e.g. recipe steps, ingredient comparisons, before/after, collections)",
+        "  - Use single_image for simple spotlights, facts, or mood posts",
         "",
         "Return your answer as strict JSON with NO extra text:",
-        '{"topic": "...", "angle": "...", "visual_keywords": ["...", "..."], "mood": "...", "content_pillar": "..."}',
+        '{"topic": "...", "angle": "...", "visual_keywords": ["...", "..."], "mood": "...", "content_pillar": "...", "content_type": "single_image or carousel"}',
     ])
 
     return "\n".join(lines)
@@ -113,9 +117,19 @@ def build_caption_prompt(config: AccountConfig, brief: PlannerBrief) -> str:
         f"  Mood: {brief.mood}",
         f"  Content pillar: {brief.content_pillar}",
         f"  Visual keywords: {keywords}",
+        f"  Content type: {brief.content_type}",
         "",
         "Instructions:",
         "- Write a caption with: a compelling hook line, body (2–4 sentences), and a call-to-action.",
+    ]
+
+    if brief.content_type == "carousel":
+        lines.append(
+            "- This is a carousel post (multiple images). Write a caption that works for the whole set, "
+            "referencing the collection/series theme. Invite the viewer to swipe through."
+        )
+
+    lines.extend([
         "- Do NOT include hashtags inside the caption text.",
         "- Return exactly 3–5 targeted hashtags (without the # symbol) as a JSON array.",
         "- Write alt_text: a concise visual description of what the image likely shows "
@@ -123,7 +137,7 @@ def build_caption_prompt(config: AccountConfig, brief: PlannerBrief) -> str:
         "",
         "Return your answer as strict JSON with NO extra text:",
         '{"caption": "...", "hashtags": ["...", "..."], "alt_text": "..."}',
-    ]
+    ])
 
     return "\n".join(lines)
 
@@ -268,3 +282,11 @@ def build_reviewer_text_prompt(
     ]
 
     return "\n".join(lines)
+
+
+def build_facebook_caption(caption: str, hashtags: list[str]) -> str:
+    """Adapt an Instagram caption for Facebook (fewer hashtags)."""
+    # Facebook performs better with 0-2 hashtags instead of 3-5
+    fb_hashtags = hashtags[:2] if hashtags else []
+    tag_line = " ".join(f"#{h}" for h in fb_hashtags)
+    return f"{caption}\n\n{tag_line}" if tag_line else caption
