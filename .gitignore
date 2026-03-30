@@ -21,6 +21,9 @@ storage/media/*
 .vscode/
 .idea/
 
+# Internal docs
+docs/
+
 # OS
 .DS_Store
 Thumbs.db
