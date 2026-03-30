@@ -5,9 +5,20 @@ import logging
 import re
 
 from agents import PlannerBrief
+from utils.ai_client import generate_text
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
+
+# Per-platform caption adaptation guidelines
+PLATFORM_CAPTION_GUIDELINES: dict[str, str] = {
+    "facebook": "Conversational tone. 0-2 hashtags max. Can be slightly longer. Ask a question or tell a story.",
+    "pinterest": "SEO-focused description. No hashtags. Include relevant keywords naturally. 2-3 sentences.",
+    "linkedin": "Professional, thought-leadership tone. 1-3 hashtags. Value-driven insight. 2-4 sentences.",
+    "tiktok": "Casual, Gen Z tone. 3-5 trending hashtags. Short hook. 1-2 sentences.",
+    "twitter": "Punchy, under 280 characters total. 0-1 hashtags. One compelling line.",
+    "youtube": "Informative description. 3-5 hashtags at the end. 2-3 sentences of context.",
+}
 
 
 def _extract_json(text: str) -> dict:
@@ -290,3 +301,62 @@ def build_facebook_caption(caption: str, hashtags: list[str]) -> str:
     fb_hashtags = hashtags[:2] if hashtags else []
     tag_line = " ".join(f"#{h}" for h in fb_hashtags)
     return f"{caption}\n\n{tag_line}" if tag_line else caption
+
+
+def build_platform_caption_prompt(
+    caption: str,
+    hashtags: list[str],
+    platform: str,
+) -> str:
+    """Build an AI prompt to adapt an Instagram caption for a target platform."""
+    guidelines = PLATFORM_CAPTION_GUIDELINES.get(platform)
+    if not guidelines:
+        raise ValueError(
+            f"No caption guidelines for platform '{platform}'. "
+            f"Valid platforms: {', '.join(sorted(PLATFORM_CAPTION_GUIDELINES))}"
+        )
+
+    hashtag_str = ", ".join(f"#{h}" for h in hashtags) if hashtags else "(none)"
+
+    lines = [
+        f"Adapt the following Instagram caption for {platform}.",
+        "",
+        f"Platform guidelines for {platform}: {guidelines}",
+        "",
+        "Original Instagram caption:",
+        caption,
+        "",
+        f"Original hashtags: {hashtag_str}",
+        "",
+        "Instructions:",
+        f"- Rewrite the caption to match {platform}'s style and guidelines above.",
+        "- Keep the core message and meaning intact.",
+        "- Adjust tone, length, and hashtag usage per the guidelines.",
+        "- Return ONLY the final adapted caption text (including any hashtags inline).",
+        "- Do NOT return JSON — just the plain caption text ready to post.",
+    ]
+
+    return "\n".join(lines)
+
+
+async def adapt_caption_for_platform(
+    caption: str,
+    hashtags: list[str],
+    platform: str,
+) -> str:
+    """Adapt an Instagram caption for a target platform using AI, with fallback."""
+    try:
+        prompt = build_platform_caption_prompt(caption, hashtags, platform)
+        adapted = await generate_text(prompt)
+        adapted = adapted.strip()
+        if not adapted:
+            raise ValueError("AI returned empty caption")
+        logger.info("Adapted caption for %s via AI (%d chars).", platform, len(adapted))
+        return adapted
+    except Exception as exc:
+        logger.warning(
+            "AI caption adaptation failed for %s, falling back to simple method: %s",
+            platform,
+            exc,
+        )
+        return build_facebook_caption(caption, hashtags)

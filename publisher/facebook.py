@@ -2,11 +2,13 @@
 
 import logging
 import os
+import tempfile
 
 import httpx
 
 from publisher.temp_server import TempImageServer
 from utils.config_loader import AccountConfig
+from utils.image_utils import resize_for_platform
 
 logger = logging.getLogger(__name__)
 
@@ -23,40 +25,50 @@ async def publish_photo_to_facebook(
     token = _get_facebook_token(config)
     page_id = config.facebook_page_id
 
-    with TempImageServer(image_path, config.temp_http_port) as public_url:
-        logger.info("Image available at %s — publishing to Facebook Page.", public_url)
+    # Resize to Facebook optimal dimensions
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix="_fb.jpg")
+    os.close(tmp_fd)
+    try:
+        resized_path = await resize_for_platform(image_path, tmp_path, "facebook")
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            url = f"{_GRAPH_API_BASE}/{page_id}/photos"
-            params: dict[str, str] = {
-                "url": public_url,
-                "message": caption_text,
-                "access_token": token,
-            }
+        with TempImageServer(resized_path, config.temp_http_port) as public_url:
+            logger.info("Image available at %s — publishing to Facebook Page.", public_url)
 
-            try:
-                response = await client.post(url, data=params)
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                body = exc.response.text
-                raise RuntimeError(
-                    f"Facebook API error publishing photo (HTTP {exc.response.status_code}): {body}"
-                ) from exc
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                url = f"{_GRAPH_API_BASE}/{page_id}/photos"
+                params: dict[str, str] = {
+                    "url": public_url,
+                    "message": caption_text,
+                    "access_token": token,
+                }
 
-            data = response.json()
-            if "error" in data:
-                err = data["error"]
-                raise RuntimeError(
-                    f"Facebook API error: {err.get('message', 'Unknown')} "
-                    f"(code {err.get('code', '?')})"
-                )
+                try:
+                    response = await client.post(url, data=params)
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    body = exc.response.text
+                    raise RuntimeError(
+                        f"Facebook API error publishing photo (HTTP {exc.response.status_code}): {body}"
+                    ) from exc
 
-            post_id = data.get("post_id") or data.get("id")
-            if not post_id:
-                raise RuntimeError(f"Facebook API returned no post ID. Response: {data}")
+                data = response.json()
+                if "error" in data:
+                    err = data["error"]
+                    raise RuntimeError(
+                        f"Facebook API error: {err.get('message', 'Unknown')} "
+                        f"(code {err.get('code', '?')})"
+                    )
 
-            logger.info("Published photo to Facebook — post ID: %s", post_id)
-            return post_id
+                post_id = data.get("post_id") or data.get("id")
+                if not post_id:
+                    raise RuntimeError(f"Facebook API returned no post ID. Response: {data}")
+
+                logger.info("Published photo to Facebook — post ID: %s", post_id)
+                return post_id
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+            logger.debug("Cleaned up Facebook temp image: %s", tmp_path)
 
 
 async def publish_carousel_to_facebook(
@@ -71,61 +83,75 @@ async def publish_carousel_to_facebook(
     if len(image_paths) < 2:
         raise ValueError("Facebook carousel requires at least 2 images.")
 
-    server = TempImageServer(image_paths, config.temp_http_port)
-    with server:
-        logger.info(
-            "Serving %d images — publishing carousel to Facebook Page.", len(image_paths)
-        )
+    # Resize all images to Facebook optimal dimensions
+    resized_paths: list[str] = []
+    try:
+        for orig_path in image_paths:
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix="_fb.jpg")
+            os.close(tmp_fd)
+            await resize_for_platform(orig_path, tmp_path, "facebook")
+            resized_paths.append(tmp_path)
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Step 1: Upload each photo as unpublished
-            photo_ids: list[str] = []
-            for i, img_path in enumerate(image_paths):
-                image_url = server.get_url(img_path)
-                photo_id = await _upload_unpublished_photo(
-                    client, page_id, token, image_url
-                )
-                logger.info(
-                    "Facebook carousel photo %d/%d uploaded (unpublished): %s",
-                    i + 1, len(image_paths), photo_id,
-                )
-                photo_ids.append(photo_id)
+        server = TempImageServer(resized_paths, config.temp_http_port)
+        with server:
+            logger.info(
+                "Serving %d images — publishing carousel to Facebook Page.", len(resized_paths)
+            )
 
-            # Step 2: Create multi-photo post with attached_media
-            url = f"{_GRAPH_API_BASE}/{page_id}/feed"
-            params: dict[str, str] = {
-                "message": caption_text,
-                "access_token": token,
-            }
-            for j, pid in enumerate(photo_ids):
-                params[f"attached_media[{j}]"] = f'{{"media_fbid":"{pid}"}}'
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Step 1: Upload each photo as unpublished
+                photo_ids: list[str] = []
+                for i, img_path in enumerate(resized_paths):
+                    image_url = server.get_url(img_path)
+                    photo_id = await _upload_unpublished_photo(
+                        client, page_id, token, image_url
+                    )
+                    logger.info(
+                        "Facebook carousel photo %d/%d uploaded (unpublished): %s",
+                        i + 1, len(resized_paths), photo_id,
+                    )
+                    photo_ids.append(photo_id)
 
-            try:
-                response = await client.post(url, data=params)
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                body = exc.response.text
-                raise RuntimeError(
-                    f"Facebook API error creating multi-photo post "
-                    f"(HTTP {exc.response.status_code}): {body}"
-                ) from exc
+                # Step 2: Create multi-photo post with attached_media
+                url = f"{_GRAPH_API_BASE}/{page_id}/feed"
+                params: dict[str, str] = {
+                    "message": caption_text,
+                    "access_token": token,
+                }
+                for j, pid in enumerate(photo_ids):
+                    params[f"attached_media[{j}]"] = f'{{"media_fbid":"{pid}"}}'
 
-            data = response.json()
-            if "error" in data:
-                err = data["error"]
-                raise RuntimeError(
-                    f"Facebook API error: {err.get('message', 'Unknown')} "
-                    f"(code {err.get('code', '?')})"
-                )
+                try:
+                    response = await client.post(url, data=params)
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    body = exc.response.text
+                    raise RuntimeError(
+                        f"Facebook API error creating multi-photo post "
+                        f"(HTTP {exc.response.status_code}): {body}"
+                    ) from exc
 
-            post_id = data.get("id")
-            if not post_id:
-                raise RuntimeError(
-                    f"Facebook API returned no post ID. Response: {data}"
-                )
+                data = response.json()
+                if "error" in data:
+                    err = data["error"]
+                    raise RuntimeError(
+                        f"Facebook API error: {err.get('message', 'Unknown')} "
+                        f"(code {err.get('code', '?')})"
+                    )
 
-            logger.info("Published carousel to Facebook — post ID: %s", post_id)
-            return post_id
+                post_id = data.get("id")
+                if not post_id:
+                    raise RuntimeError(
+                        f"Facebook API returned no post ID. Response: {data}"
+                    )
+
+                logger.info("Published carousel to Facebook — post ID: %s", post_id)
+                return post_id
+    finally:
+        for tmp_path in resized_paths:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+                logger.debug("Cleaned up Facebook temp image: %s", tmp_path)
 
 
 async def _upload_unpublished_photo(

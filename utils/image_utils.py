@@ -11,9 +11,21 @@ from PIL import Image, ImageOps
 
 logger = logging.getLogger(__name__)
 
-# Instagram target dimensions
-INSTAGRAM_SQUARE = (1080, 1080)
-INSTAGRAM_PORTRAIT = (1080, 1350)
+# Platform dimension registry — (width, height) for optimal image sizing
+PLATFORM_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "instagram_square": (1080, 1080),
+    "instagram_portrait": (1080, 1350),
+    "facebook": (1200, 630),
+    "pinterest": (1000, 1500),
+    "linkedin": (1200, 627),
+    "tiktok": (1080, 1920),
+    "youtube": (1280, 720),
+    "twitter": (1200, 675),
+}
+
+# Backward-compatible aliases referencing the registry
+INSTAGRAM_SQUARE = PLATFORM_DIMENSIONS["instagram_square"]
+INSTAGRAM_PORTRAIT = PLATFORM_DIMENSIONS["instagram_portrait"]
 
 
 def _resize_sync(image_path: str, output_path: str, target_size: tuple[int, int]) -> str:
@@ -46,6 +58,21 @@ def _resize_sync(image_path: str, output_path: str, target_size: tuple[int, int]
         target_size[1],
     )
     return output_path
+
+
+async def resize_for_platform(
+    image_path: str,
+    output_path: str,
+    platform: str,
+) -> str:
+    """Resize and crop an image to optimal dimensions for the given platform."""
+    if platform not in PLATFORM_DIMENSIONS:
+        raise ValueError(
+            f"Unknown platform '{platform}'. "
+            f"Valid platforms: {', '.join(sorted(PLATFORM_DIMENSIONS))}"
+        )
+    target_size = PLATFORM_DIMENSIONS[platform]
+    return await asyncio.to_thread(_resize_sync, image_path, output_path, target_size)
 
 
 async def resize_for_instagram(

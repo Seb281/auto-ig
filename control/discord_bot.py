@@ -33,7 +33,7 @@ from publisher.scheduler import get_next_run_time, pipeline_job_id, schedule_pip
 from utils.ai_client import generate_text, generate_image
 from utils.config_loader import AccountConfig
 from utils.image_utils import is_duplicate_image
-from utils.prompts import build_facebook_caption
+from utils.prompts import adapt_caption_for_platform, build_facebook_caption
 
 logger = logging.getLogger(__name__)
 
@@ -385,7 +385,7 @@ async def _do_publish_draft(
             # Publish to Facebook if configured
             if "facebook" in config.platforms and config.facebook_page_id:
                 try:
-                    fb_caption = build_facebook_caption(caption, hashtags)
+                    fb_caption = await adapt_caption_for_platform(caption, hashtags, "facebook")
                     if content_type == "carousel" and len(image_paths) >= 2:
                         fb_post_id = await publish_carousel_to_facebook(
                             config, image_paths, fb_caption
