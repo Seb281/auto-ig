@@ -27,7 +27,7 @@ import httpx
 from agents import PipelineResult, PlannerBrief
 from agents.orchestrator import run_pipeline
 from agents.reviewer import STATUS_FAIL
-from publisher.instagram import publish_post, publish_carousel, save_post_record
+from publisher.instagram import publish_post, publish_carousel, publish_reel, save_post_record
 from publisher.facebook import publish_photo_to_facebook, publish_carousel_to_facebook
 from publisher.scheduler import get_next_run_time, pipeline_job_id, schedule_pipeline_job
 from utils.ai_client import generate_text, generate_image
@@ -73,7 +73,12 @@ def _format_draft_caption(caption: str, hashtags: list[str]) -> str:
 def _format_draft_preview(caption: str, hashtags: list[str], content_type: str = "single_image") -> str:
     """Build a human-readable draft preview for Discord."""
     full = _format_draft_caption(caption, hashtags)
-    type_label = "CAROUSEL" if content_type == "carousel" else "SINGLE IMAGE"
+    if content_type == "carousel":
+        type_label = "CAROUSEL"
+    elif content_type == "reel":
+        type_label = "REEL"
+    else:
+        type_label = "SINGLE IMAGE"
     lines = [
         f"--- DRAFT PREVIEW ({type_label}) ---",
         "",
@@ -144,6 +149,7 @@ async def _save_pending_draft(
     brief: PlannerBrief,
     timeout_hours: int,
     content_type: str = "single_image",
+    duration_seconds: float | None = None,
 ) -> int:
     """Insert a new pending draft and return its row ID."""
     now = datetime.now(timezone.utc)
@@ -154,8 +160,8 @@ async def _save_pending_draft(
             """
             INSERT INTO pending_drafts
                 (account_id, image_path, image_phash, caption, hashtags, alt_text,
-                 brief_json, created_at, publish_at, status, content_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                 brief_json, created_at, publish_at, status, content_type, duration_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 account_id,
@@ -168,6 +174,7 @@ async def _save_pending_draft(
                 now.isoformat(),
                 publish_at.isoformat(),
                 content_type,
+                duration_seconds,
             ),
         )
         await db.commit()
@@ -371,7 +378,11 @@ async def _do_publish_draft(
             published_platforms = list(config.platforms)
         else:
             # Publish to Instagram
-            if content_type == "carousel" and len(image_paths) >= 2:
+            if content_type == "reel":
+                media_id = await publish_reel(
+                    config, image_paths[0], full_caption
+                )
+            elif content_type == "carousel" and len(image_paths) >= 2:
                 media_id = await publish_carousel(
                     config, image_paths, full_caption, alt_text
                 )
@@ -382,8 +393,12 @@ async def _do_publish_draft(
             published_platforms.append("instagram")
             prefix = ""
 
-            # Publish to Facebook if configured
-            if "facebook" in config.platforms and config.facebook_page_id:
+            # Publish to Facebook if configured (skip for reels)
+            if (
+                content_type != "reel"
+                and "facebook" in config.platforms
+                and config.facebook_page_id
+            ):
                 try:
                     fb_caption = await adapt_caption_for_platform(caption, hashtags, "facebook")
                     if content_type == "carousel" and len(image_paths) >= 2:
@@ -493,19 +508,32 @@ async def send_draft_for_review(
         )
         return
 
-    # Determine content type and image list
+    # Determine content type and media list
     content_type = result.brief.content_type if result.brief else "single_image"
     is_carousel = content_type == "carousel" and len(result.images) > 1
+    is_reel = content_type == "reel" and result.video is not None
 
-    # Copy image(s) to draft-specific paths
+    # Copy media to draft-specific paths
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     media_dir = os.path.join(base_dir, "storage", "media")
     os.makedirs(media_dir, exist_ok=True)
 
     draft_image_paths: list[str] = []
     all_phashes: list[str] = []
+    duration_seconds: float | None = None
 
-    if is_carousel:
+    if is_reel:
+        draft_path = os.path.join(
+            media_dir, f"draft_reel_{os.path.basename(result.video.local_path)}"
+        )
+        await asyncio.to_thread(shutil.copy2, result.video.local_path, draft_path)
+        draft_image_paths.append(draft_path)
+        all_phashes.append(result.video.phash)
+        duration_seconds = result.video.duration_seconds
+        # Clean up original
+        if os.path.exists(result.video.local_path):
+            os.remove(result.video.local_path)
+    elif is_carousel:
         for i, img in enumerate(result.images):
             draft_path = os.path.join(
                 media_dir, f"draft_carousel_{i}_{os.path.basename(img.local_path)}"
@@ -532,7 +560,7 @@ async def send_draft_for_review(
         if os.path.exists(result.image.local_path):
             os.remove(result.image.local_path)
 
-    # For database storage: carousel stores JSON array, single stores plain path
+    # For database storage: carousel stores JSON array, single/reel stores plain path
     if is_carousel:
         db_image_path = json.dumps(draft_image_paths)
         db_image_phash = ",".join(all_phashes)
@@ -552,11 +580,19 @@ async def send_draft_for_review(
         brief=result.brief,
         timeout_hours=config.auto_publish_timeout_hours,
         content_type=content_type,
+        duration_seconds=duration_seconds,
     )
 
-    # Send image(s)
+    # Send media to Discord
     try:
-        if is_carousel:
+        if is_reel:
+            video_bytes = await asyncio.to_thread(_read_file_bytes, draft_image_paths[0])
+            file = discord.File(io.BytesIO(video_bytes), filename="draft_reel.mp4")
+            await channel.send(
+                content=f"[{config.account_id}] Draft #{draft_id} ready for review",
+                file=file,
+            )
+        elif is_carousel:
             # Send all carousel images
             for i, path in enumerate(draft_image_paths):
                 photo_bytes = await asyncio.to_thread(_read_file_bytes, path)
@@ -571,9 +607,9 @@ async def send_draft_for_review(
                 file=file,
             )
     except Exception as exc:
-        logger.error("Failed to send draft photo: %s", exc)
+        logger.error("Failed to send draft media: %s", exc)
         await channel.send(
-            content=f"[{config.account_id}] Draft #{draft_id} ready (could not send image: {exc})",
+            content=f"[{config.account_id}] Draft #{draft_id} ready (could not send media: {exc})",
         )
 
     # Send caption preview
@@ -859,11 +895,13 @@ async def cmd_runstock(ctx: commands.Context) -> None:
 
     finally:
         bot_data[pipeline_key] = False
-        # Clean up pipeline images if send_draft_for_review didn't get to them
+        # Clean up pipeline media if send_draft_for_review didn't get to them
         if result is not None:
             for img in result.images:
                 if img.local_path and os.path.exists(img.local_path):
                     os.remove(img.local_path)
+            if result.video and result.video.local_path and os.path.exists(result.video.local_path):
+                os.remove(result.video.local_path)
 
 
 async def cmd_run(ctx: commands.Context) -> None:
@@ -928,11 +966,13 @@ async def cmd_run(ctx: commands.Context) -> None:
 
     finally:
         bot_data[pipeline_key] = False
-        # Clean up pipeline images if send_draft_for_review didn't get to them
+        # Clean up pipeline media if send_draft_for_review didn't get to them
         if result is not None:
             for img in result.images:
                 if img.local_path and os.path.exists(img.local_path):
                     os.remove(img.local_path)
+            if result.video and result.video.local_path and os.path.exists(result.video.local_path):
+                os.remove(result.video.local_path)
 
 
 async def cmd_approve(ctx: commands.Context) -> None:

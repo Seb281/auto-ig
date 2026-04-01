@@ -241,6 +241,12 @@ async def init_db(db_path: str) -> None:
                 "ALTER TABLE post_history ADD COLUMN published_platforms TEXT NOT NULL DEFAULT 'instagram'"
             )
 
+        # Migration: add duration_seconds column to pending_drafts if missing (reels)
+        if "duration_seconds" not in draft_columns:
+            await db.execute(
+                "ALTER TABLE pending_drafts ADD COLUMN duration_seconds REAL"
+            )
+
         await db.commit()
 
     logger.info("Database initialized at %s", db_path)

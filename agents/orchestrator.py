@@ -3,11 +3,12 @@
 import logging
 import os
 
-from agents import CaptionResult, ImageResult, PipelineResult, PlannerBrief, ReviewResult
+from agents import CaptionResult, ImageResult, PipelineResult, PlannerBrief, ReviewResult, VideoResult
 from agents.caption_writer import generate_caption
 from agents.content_planner import generate_brief
 from agents.image_sourcing import source_image, source_carousel_images
-from agents.reviewer import review_post, review_carousel_post, RETRY_CAPTION, RETRY_IMAGE, STATUS_PASS
+from agents.reviewer import review_post, review_carousel_post, review_reel_post, RETRY_CAPTION, RETRY_IMAGE, RETRY_VIDEO, STATUS_PASS
+from agents.video_sourcing import source_video
 from utils.config_loader import AccountConfig
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ async def run_pipeline(
 
     image: ImageResult | None = None
     images: list[ImageResult] = []
+    video: VideoResult | None = None
     try:
         # Step 1: Generate or synthesize a brief
         if user_photo_path is not None:
@@ -53,9 +55,25 @@ async def run_pipeline(
             brief = await generate_brief(config, db_path, user_hint)
 
         is_carousel = brief.content_type == "carousel" and user_photo_path is None
+        is_reel = brief.content_type == "reel" and user_photo_path is None
 
-        # Step 2: Source image(s)
-        if is_carousel:
+        # Step 2: Source media
+        if is_reel:
+            logger.info("Sourcing reel video...")
+            video = await source_video(
+                config=config,
+                brief=brief,
+                db_path=db_path,
+                media_dir=media_dir,
+            )
+            logger.info(
+                "Video sourced — source: %s, score: %.2f, duration: %.1fs, path: %s",
+                video.source,
+                video.score,
+                video.duration_seconds,
+                video.local_path,
+            )
+        elif is_carousel:
             logger.info("Sourcing carousel images (3-5)...")
             images = await source_carousel_images(
                 config=config,
@@ -96,7 +114,9 @@ async def run_pipeline(
         for attempt in range(1, MAX_REVIEW_RETRIES + 1):
             logger.info("Running reviewer (attempt %d/%d)...", attempt, MAX_REVIEW_RETRIES)
 
-            if is_carousel:
+            if is_reel:
+                review = await review_reel_post(config, brief, video, caption, db_path)
+            elif is_carousel:
                 review = await review_carousel_post(config, brief, images, caption, db_path)
             else:
                 review = await review_post(config, brief, image, caption, db_path)
@@ -121,7 +141,22 @@ async def run_pipeline(
                 break
 
             # Retry the appropriate upstream step
-            if review.retry_type == RETRY_IMAGE:
+            if review.retry_type == RETRY_VIDEO:
+                logger.info("Re-sourcing video for retry...")
+                if video is not None and video.local_path and os.path.exists(video.local_path):
+                    os.remove(video.local_path)
+                video = await source_video(
+                    config=config,
+                    brief=brief,
+                    db_path=db_path,
+                    media_dir=media_dir,
+                )
+                logger.info(
+                    "Video re-sourced — source: %s, score: %.2f",
+                    video.source,
+                    video.score,
+                )
+            elif review.retry_type == RETRY_IMAGE:
                 if is_carousel:
                     logger.info("Re-sourcing carousel images for retry...")
                     # Clean up old images
@@ -177,21 +212,24 @@ async def run_pipeline(
             error=None,
             skipped=False,
             images=images,
+            video=video,
         )
 
     except Exception as exc:
         logger.error("Pipeline failed: %s", exc, exc_info=True)
-        # Clean up images on error — no draft will be created to manage them
+        # Clean up images and video on error — no draft will be created to manage them
         all_image_paths = set()
         if image is not None and image.local_path:
             all_image_paths.add(image.local_path)
         for img in images:
             if img.local_path:
                 all_image_paths.add(img.local_path)
+        if video is not None and video.local_path:
+            all_image_paths.add(video.local_path)
         for path in all_image_paths:
             if os.path.exists(path):
                 os.remove(path)
-                logger.info("Cleaned up image after error: %s", path)
+                logger.info("Cleaned up media after error: %s", path)
         return PipelineResult(
             success=False,
             post_id=None,

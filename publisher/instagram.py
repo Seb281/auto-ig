@@ -19,6 +19,7 @@ _GRAPH_API_BASE = "https://graph.facebook.com/v25.0"
 # Polling configuration
 _POLL_INTERVAL_SECONDS = 3
 _POLL_MAX_SECONDS = 60
+_POLL_MAX_SECONDS_VIDEO = 300
 
 
 async def publish_post(
@@ -114,6 +115,84 @@ async def publish_carousel(
             logger.info("Carousel published to Instagram — media ID: %s", media_id)
 
     return media_id
+
+
+async def publish_reel(
+    config: AccountConfig,
+    video_path: str,
+    caption_text: str,
+) -> str:
+    """Publish a reel to Instagram via the Meta Graph API and return the media ID."""
+    token = os.getenv(config.access_token_env)
+    if not token:
+        raise ValueError(
+            f"Instagram access token env var '{config.access_token_env}' is missing or empty."
+        )
+
+    with TempImageServer(video_path, config.temp_http_port) as public_url:
+        logger.info("Video available at %s — starting Meta Graph API reel publish flow.", public_url)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Step 1: Create reel container
+            container_id = await _create_reel_container(
+                client, config.instagram_user_id, token, public_url, caption_text
+            )
+            logger.info("Reel container created: %s", container_id)
+
+            # Step 2: Poll until container is ready (video takes longer)
+            await _poll_container_status(
+                client, container_id, token, max_seconds=_POLL_MAX_SECONDS_VIDEO
+            )
+            logger.info("Reel container ready for publishing.")
+
+            # Step 3: Publish the container
+            media_id = await _publish_container(
+                client, config.instagram_user_id, token, container_id
+            )
+            logger.info("Reel published to Instagram — media ID: %s", media_id)
+
+    return media_id
+
+
+async def _create_reel_container(
+    client: httpx.AsyncClient,
+    ig_user_id: str,
+    token: str,
+    video_url: str,
+    caption: str,
+) -> str:
+    """Create a REELS media container on Instagram and return the container ID."""
+    url = f"{_GRAPH_API_BASE}/{ig_user_id}/media"
+    params: dict[str, str] = {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": caption,
+        "access_token": token,
+    }
+
+    try:
+        response = await client.post(url, data=params)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text
+        raise RuntimeError(
+            f"Meta API error creating reel container (HTTP {exc.response.status_code}): {body}"
+        ) from exc
+
+    data = response.json()
+
+    if "error" in data:
+        err = data["error"]
+        raise RuntimeError(
+            f"Meta API error creating reel container: {err.get('message', 'Unknown')} "
+            f"(code {err.get('code', '?')})"
+        )
+
+    container_id = data.get("id")
+    if not container_id:
+        raise RuntimeError(f"Meta API returned no reel container ID. Response: {data}")
+
+    return container_id
 
 
 async def _create_container(
@@ -243,12 +322,13 @@ async def _poll_container_status(
     client: httpx.AsyncClient,
     container_id: str,
     token: str,
+    max_seconds: int = _POLL_MAX_SECONDS,
 ) -> None:
     """Poll the container status until FINISHED or raise on ERROR/timeout."""
     url = f"{_GRAPH_API_BASE}/{container_id}"
     params = {"fields": "status_code", "access_token": token}
 
-    max_iterations = _POLL_MAX_SECONDS // _POLL_INTERVAL_SECONDS
+    max_iterations = max_seconds // _POLL_INTERVAL_SECONDS
     for iteration in range(1, max_iterations + 1):
         try:
             response = await client.get(url, params=params)
@@ -284,7 +364,7 @@ async def _poll_container_status(
 
     raise TimeoutError(
         f"Media container {container_id} did not reach FINISHED status "
-        f"within {_POLL_MAX_SECONDS} seconds."
+        f"within {max_seconds} seconds."
     )
 
 

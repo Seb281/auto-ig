@@ -99,13 +99,15 @@ def build_planner_prompt(
         "Requirements:",
         "- content_pillar must be exactly one of: " + pillars,
         "- visual_keywords must contain 3–5 concrete, photographable nouns suitable for stock photo search",
-        '- content_type must be either "single_image" or "carousel"',
+        '- content_type must be "single_image", "carousel", or "reel"',
         "  - Use carousel when the topic benefits from showing multiple angles, steps, or variations",
         "    (e.g. recipe steps, ingredient comparisons, before/after, collections)",
+        "  - Use reel for topics that benefit from motion, ambiance, or process footage",
+        "    (e.g. cooking processes, pouring drinks, nature scenes, atmospheric moments)",
         "  - Use single_image for simple spotlights, facts, or mood posts",
         "",
         "Return your answer as strict JSON with NO extra text:",
-        '{"topic": "...", "angle": "...", "visual_keywords": ["...", "..."], "mood": "...", "content_pillar": "...", "content_type": "single_image or carousel"}',
+        '{"topic": "...", "angle": "...", "visual_keywords": ["...", "..."], "mood": "...", "content_pillar": "...", "content_type": "single_image or carousel or reel"}',
     ])
 
     return "\n".join(lines)
@@ -138,6 +140,12 @@ def build_caption_prompt(config: AccountConfig, brief: PlannerBrief) -> str:
         lines.append(
             "- This is a carousel post (multiple images). Write a caption that works for the whole set, "
             "referencing the collection/series theme. Invite the viewer to swipe through."
+        )
+    elif brief.content_type == "reel":
+        lines.append(
+            "- This is a reel (short video). Write a hook-heavy caption that complements the video. "
+            "Keep it concise — reels captions should grab attention in the first line. "
+            "No need to describe what's in the video; focus on the feeling or takeaway."
         )
 
     lines.extend([

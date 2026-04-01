@@ -11,7 +11,7 @@ from utils.prompts import _extract_json, build_planner_prompt
 logger = logging.getLogger(__name__)
 
 # Valid content types
-_VALID_CONTENT_TYPES = {"single_image", "carousel"}
+_VALID_CONTENT_TYPES = {"single_image", "carousel", "reel"}
 
 
 def _normalize_pillar(raw: str) -> str:

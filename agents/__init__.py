@@ -48,6 +48,19 @@ class ReviewResult:
 
 
 @dataclass
+class VideoResult:
+    """Output of the Video Sourcing agent."""
+
+    local_path: str
+    source: str  # "pexels"
+    phash: str
+    score: float  # 0.0–1.0
+    duration_seconds: float
+    width: int
+    height: int
+
+
+@dataclass
 class PipelineResult:
     """End-to-end result of a single pipeline run."""
 
@@ -61,3 +74,5 @@ class PipelineResult:
     skipped: bool = field(default=False)
     # Carousel support: list of ImageResult for multi-image posts
     images: list[ImageResult] = field(default_factory=list)
+    # Reel support: video result for reel posts
+    video: VideoResult | None = None

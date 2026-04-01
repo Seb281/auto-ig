@@ -4,11 +4,12 @@ import asyncio
 import logging
 import os
 
-from agents import CaptionResult, ImageResult, PlannerBrief, ReviewResult
+from agents import CaptionResult, ImageResult, PlannerBrief, ReviewResult, VideoResult
 from utils.ai_client import generate_vision, read_image_file
 from utils.config_loader import AccountConfig
 from utils.image_utils import is_duplicate_image
 from utils.prompts import _extract_json, build_reviewer_vision_prompt
+from utils.video_utils import extract_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ STATUS_FAIL = "FAIL"
 # Valid retry types
 RETRY_IMAGE = "image"
 RETRY_CAPTION = "caption"
+RETRY_VIDEO = "video"
 
 
 def _check_caption_banned_topics(
@@ -82,7 +84,7 @@ async def _vision_review(
         retry_type = None
     else:
         retry_type = str(raw_retry).lower().strip()
-        if retry_type not in (RETRY_IMAGE, RETRY_CAPTION):
+        if retry_type not in (RETRY_IMAGE, RETRY_CAPTION, RETRY_VIDEO):
             logger.warning(
                 "Reviewer returned unknown retry_type '%s', defaulting to 'caption'.",
                 retry_type,
@@ -272,6 +274,93 @@ async def review_carousel_post(
         status = STATUS_PASS
         retry_type = None
         logger.info("Carousel review PASSED — all %d slides OK.", len(images))
+
+    return ReviewResult(
+        status=status,
+        reasons=all_reasons,
+        retry_type=retry_type,
+    )
+
+
+async def review_reel_post(
+    config: AccountConfig,
+    brief: PlannerBrief,
+    video: VideoResult,
+    caption: CaptionResult,
+    db_path: str,
+) -> ReviewResult:
+    """Review a reel post — check video thumbnail, caption, and duplicates."""
+    all_reasons: list[str] = []
+    retry_type: str | None = None
+
+    # Check 1: Duplicate video via perceptual hash of thumbnail
+    logger.info("Checking for duplicate video...")
+    try:
+        is_dup = await is_duplicate_image(
+            video.phash, db_path, config.account_id
+        )
+    except Exception as exc:
+        logger.warning("Duplicate check failed: %s. Proceeding anyway.", exc)
+        is_dup = False
+
+    if is_dup:
+        all_reasons.append(
+            "Video is too similar to a previously published post (perceptual hash match)."
+        )
+        retry_type = RETRY_VIDEO
+        logger.info("Duplicate video detected — will recommend video retry.")
+
+    # Check 2: Text-based banned topic check
+    logger.info("Checking reel caption for banned topics...")
+    banned_violations = _check_caption_banned_topics(
+        caption.caption, caption.hashtags, config
+    )
+    if banned_violations:
+        all_reasons.extend(banned_violations)
+        if retry_type is None:
+            retry_type = RETRY_CAPTION
+
+    # Check 3: AI vision review on video thumbnail
+    logger.info("Running AI vision review on video thumbnail...")
+    thumb_path = video.local_path + ".review_thumb.jpg"
+    try:
+        await extract_thumbnail(video.local_path, thumb_path)
+
+        vision_result = await _vision_review(
+            thumb_path, config, brief, caption.caption
+        )
+
+        if vision_result.status == STATUS_FAIL:
+            all_reasons.extend(vision_result.reasons)
+            if retry_type != RETRY_VIDEO and vision_result.retry_type is not None:
+                # Remap image retry to video retry for reels
+                if vision_result.retry_type == RETRY_IMAGE:
+                    retry_type = RETRY_VIDEO
+                else:
+                    retry_type = vision_result.retry_type
+
+    except Exception as exc:
+        logger.warning(
+            "Vision review failed for reel: %s. Proceeding without vision check.", exc
+        )
+    finally:
+        if os.path.exists(thumb_path):
+            os.remove(thumb_path)
+
+    # Final verdict
+    if all_reasons:
+        status = STATUS_FAIL
+        if retry_type is None:
+            retry_type = RETRY_CAPTION
+        logger.info(
+            "Reel review FAILED with %d reason(s). Retry type: %s",
+            len(all_reasons),
+            retry_type,
+        )
+    else:
+        status = STATUS_PASS
+        retry_type = None
+        logger.info("Reel review PASSED — no issues found.")
 
     return ReviewResult(
         status=status,
