@@ -145,6 +145,12 @@ async def source_video(
             config.image_sourcing.stock_score_threshold,
         )
 
+        if best_score < config.image_sourcing.stock_score_threshold:
+            raise RuntimeError(
+                f"Best video score {best_score:.2f} is below threshold "
+                f"{config.image_sourcing.stock_score_threshold:.2f}."
+            )
+
         # Step 4: Compute phash and check for duplicates
         phash = await compute_video_phash(best_path, media_dir)
 

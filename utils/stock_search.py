@@ -280,7 +280,7 @@ async def search_pexels_videos(
         width = item.get("width", 0)
         height = item.get("height", 0)
         photographer = item.get("user", {}).get("name", "Unknown")
-        description = item.get("url", "")
+        description = item.get("title", "")
 
         results.append(
             StockVideo(
@@ -298,22 +298,35 @@ async def search_pexels_videos(
     return results
 
 
+def _stream_to_file_sync(response: httpx.Response, dest_path: str) -> int:
+    """Stream response bytes to a file and return total bytes written."""
+    total = 0
+    with open(dest_path, "wb") as f:
+        for chunk in response.stream:
+            f.write(chunk)
+            total += len(chunk)
+    return total
+
+
 async def download_video(url: str, dest_path: str) -> str:
-    """Download a video from a URL and save it to the destination path."""
+    """Download a video from a URL using streaming to avoid loading it all into memory."""
+    dest_dir = os.path.dirname(dest_path)
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
+
     try:
         async with httpx.AsyncClient(timeout=VIDEO_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                total = 0
+                with open(dest_path, "wb") as f:
+                    async for chunk in response.aiter_bytes(chunk_size=65536):
+                        f.write(chunk)
+                        total += len(chunk)
     except httpx.TimeoutException:
         raise ConnectionError(f"Timeout downloading video from {url}")
     except httpx.HTTPError as exc:
         raise ConnectionError(f"Failed to download video from {url}: {exc}") from exc
 
-    dest_dir = os.path.dirname(dest_path)
-    if dest_dir:
-        os.makedirs(dest_dir, exist_ok=True)
-
-    await asyncio.to_thread(_write_bytes_sync, dest_path, response.content)
-
-    logger.info("Downloaded video to %s (%d bytes).", dest_path, len(response.content))
+    logger.info("Downloaded video to %s (%d bytes).", dest_path, total)
     return dest_path

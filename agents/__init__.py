@@ -16,7 +16,7 @@ class PlannerBrief:
     visual_keywords: list[str]
     mood: str
     content_pillar: str
-    content_type: str = "single_image"  # "single_image" or "carousel"
+    content_type: str = "single_image"  # "single_image" | "carousel" | "reel"
 
 
 @dataclass
@@ -44,7 +44,7 @@ class ReviewResult:
 
     status: str  # "PASS" | "FAIL"
     reasons: list[str]
-    retry_type: str | None  # "image" | "caption" | None
+    retry_type: str | None  # "image" | "caption" | "video" | None
 
 
 @dataclass
