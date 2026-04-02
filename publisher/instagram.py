@@ -37,7 +37,7 @@ async def publish_post(
         )
 
     with TempImageServer(image_path, config.temp_http_port) as public_url:
-        logger.info("Image available at %s — starting Meta Graph API publish flow.", public_url)
+        logger.info("Image URL for Meta API: %s", public_url)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Step 1: Create media container
@@ -130,7 +130,7 @@ async def publish_reel(
         )
 
     with TempImageServer(video_path, config.temp_http_port) as public_url:
-        logger.info("Video available at %s — starting Meta Graph API reel publish flow.", public_url)
+        logger.info("Video URL for Meta API: %s", public_url)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Step 1: Create reel container

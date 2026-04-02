@@ -98,7 +98,6 @@ class TempImageServer:
             raise ValueError("At least one image path must be provided.")
 
         self._image_paths = [os.path.abspath(p) for p in image_paths]
-        self._port = port
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -120,15 +119,35 @@ class TempImageServer:
         # For backwards compatibility, expose the first filename
         self._primary_filename = os.path.basename(self._image_paths[0])
 
-        # Determine public base URL
-        public_url = os.getenv("PUBLIC_URL")
-        public_ip = os.getenv("PUBLIC_IP")
+        # Determine public base URL and bind port
+        public_url = os.getenv("PUBLIC_URL", "").strip()
+        public_ip = os.getenv("PUBLIC_IP", "").strip()
         if public_url:
+            # Strip protocol if already included (e.g. "https://domain.app" → "domain.app")
+            if public_url.startswith("https://"):
+                public_url = public_url[len("https://"):]
+            elif public_url.startswith("http://"):
+                public_url = public_url[len("http://"):]
+            # Strip trailing slash
+            public_url = public_url.rstrip("/")
             self._base_url = f"https://{public_url}"
-            logger.info("Using PUBLIC_URL for image serving: %s", self._base_url)
+            # On Railway/Render, the platform routes the public URL to $PORT.
+            # Bind to $PORT instead of the config port so traffic reaches us.
+            platform_port = os.getenv("PORT", "").strip()
+            if platform_port:
+                self._port = int(platform_port)
+                logger.info(
+                    "Using PUBLIC_URL=%s with platform PORT=%d for image serving.",
+                    self._base_url, self._port,
+                )
+            else:
+                self._port = port
+                logger.info("Using PUBLIC_URL for image serving: %s (port %d)", self._base_url, self._port)
         elif public_ip:
+            self._port = port
             self._base_url = f"http://{public_ip}:{self._port}"
         else:
+            self._port = port
             fallback_ip = socket.gethostbyname(socket.gethostname())
             self._base_url = f"http://{fallback_ip}:{self._port}"
             logger.warning(
