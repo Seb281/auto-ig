@@ -13,6 +13,9 @@ from control.discord_bot import (
     _is_killed,
     _killswitch_key,
     _save_pending_draft,
+    _VALID_CONTENT_TYPES,
+    _VALID_PLATFORMS,
+    _TYPE_MAP,
     build_bot,
     get_pending_draft,
 )
@@ -97,10 +100,32 @@ class TestFormatDraftPreview:
         result = _format_draft_preview("Caption", [])
         assert "SINGLE IMAGE" in result
 
+    def test_target_platforms_shown(self):
+        result = _format_draft_preview("Caption", ["tag1"], "carousel", "instagram")
+        assert "CAROUSEL" in result
+        assert "\u2192 instagram" in result
+
+    def test_no_target_platforms(self):
+        result = _format_draft_preview("Caption", ["tag1"], "single_image", "")
+        assert "\u2192" not in result
+
 
 # ---------------------------------------------------------------------------
 # _save_pending_draft
 # ---------------------------------------------------------------------------
+
+class TestContentTypePlatformValidation:
+    def test_valid_content_types(self):
+        assert _VALID_CONTENT_TYPES == {"single", "carousel", "reel"}
+
+    def test_valid_platforms(self):
+        assert _VALID_PLATFORMS == {"instagram", "facebook"}
+
+    def test_type_map(self):
+        assert _TYPE_MAP["single"] == "single_image"
+        assert _TYPE_MAP["carousel"] == "carousel"
+        assert _TYPE_MAP["reel"] == "reel"
+
 
 class TestSavePendingDraft:
     async def test_inserts_row(self, tmp_db):
@@ -161,6 +186,59 @@ class TestSavePendingDraft:
 
         assert row[0] == "reel"
         assert row[1] == 15.5
+
+    async def test_stores_target_platforms(self, tmp_db):
+        brief = PlannerBrief(
+            topic="Test", angle="Angle", visual_keywords=["kw"],
+            mood="mood", content_pillar="recipes", content_type="single_image",
+        )
+        draft_id = await _save_pending_draft(
+            db_path=tmp_db,
+            account_id="test_account",
+            image_path="/tmp/image.jpg",
+            image_phash="abc123",
+            caption="Caption",
+            hashtags=["tag1"],
+            alt_text="Alt",
+            brief=brief,
+            timeout_hours=4,
+            target_platforms="instagram",
+        )
+
+        async with aiosqlite.connect(tmp_db) as db:
+            cursor = await db.execute(
+                "SELECT target_platforms FROM pending_drafts WHERE id = ?",
+                (draft_id,),
+            )
+            row = await cursor.fetchone()
+
+        assert row[0] == "instagram"
+
+    async def test_default_target_platforms_empty(self, tmp_db):
+        brief = PlannerBrief(
+            topic="Test", angle="Angle", visual_keywords=["kw"],
+            mood="mood", content_pillar="recipes", content_type="single_image",
+        )
+        draft_id = await _save_pending_draft(
+            db_path=tmp_db,
+            account_id="test_account",
+            image_path="/tmp/image.jpg",
+            image_phash="abc123",
+            caption="Caption",
+            hashtags=["tag1"],
+            alt_text="Alt",
+            brief=brief,
+            timeout_hours=4,
+        )
+
+        async with aiosqlite.connect(tmp_db) as db:
+            cursor = await db.execute(
+                "SELECT target_platforms FROM pending_drafts WHERE id = ?",
+                (draft_id,),
+            )
+            row = await cursor.fetchone()
+
+        assert row[0] == ""
 
 
 # ---------------------------------------------------------------------------

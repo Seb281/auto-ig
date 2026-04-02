@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 # Valid frequency values
 _VALID_FREQUENCIES = {"1d", "2d", "3x", "2x", "1x"}
 
+# Valid content types and platforms for !run / !runstock
+_VALID_CONTENT_TYPES = {"single", "carousel", "reel"}
+_VALID_PLATFORMS = {"instagram", "facebook"}
+_TYPE_MAP = {"single": "single_image", "carousel": "carousel", "reel": "reel"}
+
 # Discord message length limit
 _DISCORD_MSG_LIMIT = 2000
 
@@ -80,7 +85,12 @@ def _format_draft_caption(caption: str, hashtags: list[str]) -> str:
     return f"{caption}\n\n{tag_line}" if tag_line else caption
 
 
-def _format_draft_preview(caption: str, hashtags: list[str], content_type: str = "single_image") -> str:
+def _format_draft_preview(
+    caption: str,
+    hashtags: list[str],
+    content_type: str = "single_image",
+    target_platforms: str = "",
+) -> str:
     """Build a human-readable draft preview for Discord."""
     full = _format_draft_caption(caption, hashtags)
     if content_type == "carousel":
@@ -89,8 +99,12 @@ def _format_draft_preview(caption: str, hashtags: list[str], content_type: str =
         type_label = "REEL"
     else:
         type_label = "SINGLE IMAGE"
+    header = f"--- DRAFT PREVIEW ({type_label}"
+    if target_platforms:
+        header += f" \u2192 {target_platforms}"
+    header += ") ---"
     lines = [
-        f"--- DRAFT PREVIEW ({type_label}) ---",
+        header,
         "",
         full,
         "",
@@ -160,6 +174,7 @@ async def _save_pending_draft(
     timeout_hours: int,
     content_type: str = "single_image",
     duration_seconds: float | None = None,
+    target_platforms: str = "",
 ) -> int:
     """Insert a new pending draft and return its row ID."""
     now = datetime.now(timezone.utc)
@@ -170,8 +185,9 @@ async def _save_pending_draft(
             """
             INSERT INTO pending_drafts
                 (account_id, image_path, image_phash, caption, hashtags, alt_text,
-                 brief_json, created_at, publish_at, status, content_type, duration_seconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                 brief_json, created_at, publish_at, status, content_type, duration_seconds,
+                 target_platforms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
             """,
             (
                 account_id,
@@ -185,15 +201,17 @@ async def _save_pending_draft(
                 publish_at.isoformat(),
                 content_type,
                 duration_seconds,
+                target_platforms,
             ),
         )
         await db.commit()
         draft_id = cursor.lastrowid
 
     logger.info(
-        "Pending draft saved — id=%d, content_type=%s, publish_at=%s",
+        "Pending draft saved — id=%d, content_type=%s, target_platforms=%s, publish_at=%s",
         draft_id,
         content_type,
+        target_platforms or "all",
         publish_at.isoformat(),
     )
     return draft_id
@@ -393,6 +411,13 @@ async def _do_publish_draft(
         )
         return
 
+    # Determine which platforms to publish to
+    raw_target = draft.get("target_platforms", "")
+    if raw_target:
+        platforms_to_publish = [p.strip() for p in raw_target.split(",")]
+    else:
+        platforms_to_publish = list(config.platforms)
+
     published_platforms: list[str] = []
     media_id: str | None = None
 
@@ -401,28 +426,29 @@ async def _do_publish_draft(
             logger.info("[DRY RUN] Skipping publish for draft %d.", draft_id)
             media_id = None
             prefix = "[DRY RUN] "
-            published_platforms = list(config.platforms)
+            published_platforms = list(platforms_to_publish)
         else:
             # Publish to Instagram
-            if content_type == "reel":
-                media_id = await publish_reel(
-                    config, image_paths[0], full_caption
-                )
-            elif content_type == "carousel" and len(image_paths) >= 2:
-                media_id = await publish_carousel(
-                    config, image_paths, full_caption, alt_text
-                )
-            else:
-                media_id = await publish_post(
-                    config, image_paths[0], full_caption, alt_text
-                )
-            published_platforms.append("instagram")
+            if "instagram" in platforms_to_publish:
+                if content_type == "reel":
+                    media_id = await publish_reel(
+                        config, image_paths[0], full_caption
+                    )
+                elif content_type == "carousel" and len(image_paths) >= 2:
+                    media_id = await publish_carousel(
+                        config, image_paths, full_caption, alt_text
+                    )
+                else:
+                    media_id = await publish_post(
+                        config, image_paths[0], full_caption, alt_text
+                    )
+                published_platforms.append("instagram")
             prefix = ""
 
-            # Publish to Facebook if configured (skip for reels)
+            # Publish to Facebook if targeted (skip for reels)
             if (
                 content_type != "reel"
-                and "facebook" in config.platforms
+                and "facebook" in platforms_to_publish
                 and config.facebook_page_id
             ):
                 try:
@@ -511,6 +537,7 @@ async def send_draft_for_review(
     channel_id: int,
     result: PipelineResult,
     bot_data: dict,
+    target_platforms: str = "",
 ) -> None:
     """Send a draft (image + caption preview) to Discord and start the auto-publish timer."""
     await bot.wait_until_ready()
@@ -607,6 +634,7 @@ async def send_draft_for_review(
         timeout_hours=config.auto_publish_timeout_hours,
         content_type=content_type,
         duration_seconds=duration_seconds,
+        target_platforms=target_platforms,
     )
 
     # Send media to Discord
@@ -639,11 +667,9 @@ async def send_draft_for_review(
         )
 
     # Send caption preview
-    preview = _format_draft_preview(result.caption.caption, result.caption.hashtags, content_type)
-
-    # Show platforms info
-    platforms = ", ".join(config.platforms)
-    preview += f"\nPlatforms: {platforms}"
+    preview = _format_draft_preview(
+        result.caption.caption, result.caption.hashtags, content_type, target_platforms
+    )
 
     await channel.send(content=_truncate(preview))
 
@@ -708,8 +734,8 @@ async def cmd_start(ctx: commands.Context) -> None:
     await ctx.send(
         "auto-ig bot is running.\n\n"
         "**Pipeline**\n"
-        "`!run` — trigger a full pipeline run (AI picks content type)\n"
-        "`!runstock` — run using only stock photos (no AI image gen)\n"
+        "`!run [single|carousel|reel] [instagram,facebook]` — trigger a pipeline run\n"
+        "`!runstock [single|carousel|reel] [instagram,facebook]` — run using only stock media\n"
         "`!suggest <topic>` — queue a topic hint for the next run\n"
         "\n"
         "**Draft Review**\n"
@@ -869,7 +895,7 @@ async def cmd_check(ctx: commands.Context) -> None:
     await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
 
-async def cmd_runstock(ctx: commands.Context) -> None:
+async def cmd_runstock(ctx: commands.Context, content_type: str = "", platforms: str = "") -> None:
     """Handle !runstock — pipeline run using only stock photos (no AI image gen)."""
     bot = ctx.bot
     bot_data = bot.bot_data
@@ -883,6 +909,26 @@ async def cmd_runstock(ctx: commands.Context) -> None:
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
     dry_run: bool = acct_ctx["dry_run"]
+
+    # Validate content type
+    force_type = None
+    if content_type:
+        if content_type not in _VALID_CONTENT_TYPES:
+            await ctx.send(f"Unknown content type `{content_type}`. Valid: single, carousel, reel")
+            return
+        force_type = _TYPE_MAP[content_type]
+
+    # Validate platforms
+    target_platforms: list[str] | None = None
+    if platforms:
+        target_platforms = [p.strip() for p in platforms.split(",")]
+        invalid = [p for p in target_platforms if p not in _VALID_PLATFORMS]
+        if invalid:
+            await ctx.send(f"Unknown platform(s): {', '.join(invalid)}. Valid: instagram, facebook")
+            return
+        if force_type == "reel" and "facebook" in target_platforms and "instagram" not in target_platforms:
+            await ctx.send("Reels can only be published to Instagram, not Facebook alone.")
+            return
 
     if _is_killed(bot_data, config):
         await ctx.send(f"[{config.account_id}] Bot is stopped. Use !killswitch to re-enable.")
@@ -901,7 +947,8 @@ async def cmd_runstock(ctx: commands.Context) -> None:
         return
 
     bot_data[pipeline_key] = True
-    await ctx.send(f"[{config.account_id}] Starting pipeline run (stock images only)...")
+    type_label = f" ({content_type})" if content_type else ""
+    await ctx.send(f"[{config.account_id}] Starting pipeline run{type_label} (stock only)...")
     result: PipelineResult | None = None
 
     try:
@@ -914,16 +961,18 @@ async def cmd_runstock(ctx: commands.Context) -> None:
             user_hint=user_hint,
             dry_run=dry_run,
             stock_only=True,
+            force_content_type=force_type,
         )
 
         if result.error:
             await send_pipeline_error(bot, channel_id, result.error)
             return
 
+        target_str = ",".join(target_platforms) if target_platforms else ""
         if result.success:
-            await send_draft_for_review(bot, channel_id, result, bot_data)
+            await send_draft_for_review(bot, channel_id, result, bot_data, target_platforms=target_str)
         elif result.review and result.review.status == STATUS_FAIL:
-            await send_draft_for_review(bot, channel_id, result, bot_data)
+            await send_draft_for_review(bot, channel_id, result, bot_data, target_platforms=target_str)
             await send_escalation(bot, channel_id, result)
         else:
             await ctx.send(
@@ -945,7 +994,7 @@ async def cmd_runstock(ctx: commands.Context) -> None:
                 os.remove(result.video.local_path)
 
 
-async def cmd_run(ctx: commands.Context) -> None:
+async def cmd_run(ctx: commands.Context, content_type: str = "", platforms: str = "") -> None:
     """Handle !run — trigger a pipeline run."""
     bot = ctx.bot
     bot_data = bot.bot_data
@@ -959,6 +1008,26 @@ async def cmd_run(ctx: commands.Context) -> None:
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
     dry_run: bool = acct_ctx["dry_run"]
+
+    # Validate content type
+    force_type = None
+    if content_type:
+        if content_type not in _VALID_CONTENT_TYPES:
+            await ctx.send(f"Unknown content type `{content_type}`. Valid: single, carousel, reel")
+            return
+        force_type = _TYPE_MAP[content_type]
+
+    # Validate platforms
+    target_platforms: list[str] | None = None
+    if platforms:
+        target_platforms = [p.strip() for p in platforms.split(",")]
+        invalid = [p for p in target_platforms if p not in _VALID_PLATFORMS]
+        if invalid:
+            await ctx.send(f"Unknown platform(s): {', '.join(invalid)}. Valid: instagram, facebook")
+            return
+        if force_type == "reel" and "facebook" in target_platforms and "instagram" not in target_platforms:
+            await ctx.send("Reels can only be published to Instagram, not Facebook alone.")
+            return
 
     if _is_killed(bot_data, config):
         await ctx.send(f"[{config.account_id}] Bot is stopped. Use !killswitch to re-enable.")
@@ -977,7 +1046,8 @@ async def cmd_run(ctx: commands.Context) -> None:
         return
 
     bot_data[pipeline_key] = True
-    await ctx.send(f"[{config.account_id}] Starting pipeline run...")
+    type_label = f" ({content_type})" if content_type else ""
+    await ctx.send(f"[{config.account_id}] Starting pipeline run{type_label}...")
     result: PipelineResult | None = None
 
     try:
@@ -989,16 +1059,18 @@ async def cmd_run(ctx: commands.Context) -> None:
             db_path=db_path,
             user_hint=user_hint,
             dry_run=dry_run,
+            force_content_type=force_type,
         )
 
         if result.error:
             await send_pipeline_error(bot, channel_id, result.error)
             return
 
+        target_str = ",".join(target_platforms) if target_platforms else ""
         if result.success:
-            await send_draft_for_review(bot, channel_id, result, bot_data)
+            await send_draft_for_review(bot, channel_id, result, bot_data, target_platforms=target_str)
         elif result.review and result.review.status == STATUS_FAIL:
-            await send_draft_for_review(bot, channel_id, result, bot_data)
+            await send_draft_for_review(bot, channel_id, result, bot_data, target_platforms=target_str)
             await send_escalation(bot, channel_id, result)
         else:
             await ctx.send(

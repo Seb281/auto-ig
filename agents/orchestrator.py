@@ -24,6 +24,7 @@ async def run_pipeline(
     user_hint: str | None = None,
     dry_run: bool = False,
     stock_only: bool = False,
+    force_content_type: str | None = None,
 ) -> PipelineResult:
     """Run the content pipeline and return a PipelineResult."""
     if dry_run:
@@ -53,6 +54,9 @@ async def run_pipeline(
         else:
             logger.info("Generating brief...")
             brief = await generate_brief(config, db_path, user_hint)
+            if force_content_type is not None:
+                logger.info("Overriding content type: %s → %s", brief.content_type, force_content_type)
+                brief.content_type = force_content_type
 
         is_carousel = brief.content_type == "carousel" and user_photo_path is None
         is_reel = brief.content_type == "reel" and user_photo_path is None

@@ -108,6 +108,53 @@ class TestRunPipelineReel:
         assert result.video is not None
 
 
+class TestRunPipelineForceContentType:
+    async def test_force_single_image(self, make_account_config, tmp_db, tmp_path):
+        config = make_account_config()
+        img = _image(tmp_path)
+
+        with patch("agents.orchestrator.generate_brief", new_callable=AsyncMock, return_value=_brief("carousel")):
+            with patch("agents.orchestrator.source_image", new_callable=AsyncMock, return_value=img):
+                with patch("agents.orchestrator.generate_caption", new_callable=AsyncMock, return_value=_caption()):
+                    with patch("agents.orchestrator.review_post", new_callable=AsyncMock, return_value=_review_pass()):
+                        result = await run_pipeline(config, tmp_db, force_content_type="single_image")
+
+        assert result.success is True
+        assert result.brief.content_type == "single_image"
+
+    async def test_force_reel(self, make_account_config, tmp_db, tmp_path):
+        config = make_account_config()
+        vid = _video(tmp_path)
+
+        with patch("agents.orchestrator.generate_brief", new_callable=AsyncMock, return_value=_brief("single_image")):
+            with patch("agents.orchestrator.source_video", new_callable=AsyncMock, return_value=vid):
+                with patch("agents.orchestrator.generate_caption", new_callable=AsyncMock, return_value=_caption()):
+                    with patch("agents.orchestrator.review_reel_post", new_callable=AsyncMock, return_value=_review_pass()):
+                        result = await run_pipeline(config, tmp_db, force_content_type="reel")
+
+        assert result.success is True
+        assert result.brief.content_type == "reel"
+        assert result.video is not None
+
+    async def test_user_photo_overrides_force(self, make_account_config, tmp_db, tmp_path):
+        """User photo forces single_image even if force_content_type says carousel."""
+        config = make_account_config()
+        user_photo = str(tmp_path / "user.jpg")
+        with open(user_photo, "wb") as f:
+            f.write(b"\xff\xd8\xff" + b"\x00" * 100)
+        img = _image(tmp_path)
+
+        with patch("agents.orchestrator.source_image", new_callable=AsyncMock, return_value=img):
+            with patch("agents.orchestrator.generate_caption", new_callable=AsyncMock, return_value=_caption()):
+                with patch("agents.orchestrator.review_post", new_callable=AsyncMock, return_value=_review_pass()):
+                    result = await run_pipeline(
+                        config, tmp_db, user_photo_path=user_photo, force_content_type="carousel"
+                    )
+
+        assert result.success is True
+        assert result.brief.content_type == "single_image"
+
+
 class TestRunPipelineRetries:
     async def test_retry_image(self, make_account_config, tmp_db, tmp_path):
         config = make_account_config()

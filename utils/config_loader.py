@@ -253,6 +253,12 @@ async def init_db(db_path: str) -> None:
                 "ALTER TABLE pending_drafts ADD COLUMN duration_seconds REAL"
             )
 
+        # Migration: add target_platforms column to pending_drafts if missing
+        if "target_platforms" not in draft_columns:
+            await db.execute(
+                "ALTER TABLE pending_drafts ADD COLUMN target_platforms TEXT NOT NULL DEFAULT ''"
+            )
+
         await db.commit()
 
     logger.info("Database initialized at %s", db_path)
