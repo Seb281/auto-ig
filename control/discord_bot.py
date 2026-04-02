@@ -60,6 +60,16 @@ def _get_account_context(bot_data: dict, channel_id: int) -> dict | None:
     return accounts.get(channel_id)
 
 
+def _killswitch_key(account_id: str) -> str:
+    """Return the bot_data key for an account's killswitch state."""
+    return f"killswitch_{account_id}"
+
+
+def _is_killed(bot_data: dict, config: AccountConfig) -> bool:
+    """Check whether the killswitch is active for an account."""
+    return bool(bot_data.get(_killswitch_key(config.account_id)))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -212,6 +222,7 @@ async def _upsert_schedule_config(
     preferred_time: str | None = None,
     paused: int | None = None,
     auto_publish: int | None = None,
+    killed: int | None = None,
     timezone: str = "UTC",
 ) -> None:
     """Insert or update the schedule_config for an account."""
@@ -227,8 +238,8 @@ async def _upsert_schedule_config(
             await db.execute(
                 """
                 INSERT INTO schedule_config
-                    (account_id, frequency, preferred_time, timezone, paused, auto_publish)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (account_id, frequency, preferred_time, timezone, paused, auto_publish, killed)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
@@ -237,6 +248,7 @@ async def _upsert_schedule_config(
                     timezone,
                     paused if paused is not None else 0,
                     auto_publish if auto_publish is not None else 0,
+                    killed if killed is not None else 0,
                 ),
             )
         else:
@@ -259,6 +271,11 @@ async def _upsert_schedule_config(
                 await db.execute(
                     "UPDATE schedule_config SET auto_publish = ? WHERE account_id = ?",
                     (auto_publish, account_id),
+                )
+            if killed is not None:
+                await db.execute(
+                    "UPDATE schedule_config SET killed = ? WHERE account_id = ?",
+                    (killed, account_id),
                 )
 
         await db.commit()
@@ -303,6 +320,15 @@ async def _auto_publish_draft(
     if current is None or current["id"] != draft_id or current["status"] != "pending":
         logger.info(
             "Draft %d is no longer pending — auto-publish cancelled.", draft_id
+        )
+        return
+
+    # Block auto-publish if killswitch is active
+    if _is_killed(bot_data, config):
+        logger.info(
+            "Killswitch active for '%s' — auto-publish of draft %d blocked.",
+            config.account_id,
+            draft_id,
         )
         return
 
@@ -697,6 +723,7 @@ async def cmd_start(ctx: commands.Context) -> None:
         "!resume — resume the scheduler\n"
         "!autopublish — toggle auto-publish on/off\n"
         "!setfrequency <value> — change posting schedule\n"
+        "!killswitch — toggle all bot activity on/off\n"
     )
 
 
@@ -847,6 +874,10 @@ async def cmd_runstock(ctx: commands.Context) -> None:
     db_path: str = acct_ctx["db_path"]
     dry_run: bool = acct_ctx["dry_run"]
 
+    if _is_killed(bot_data, config):
+        await ctx.send(f"[{config.account_id}] Bot is stopped. Use !killswitch to re-enable.")
+        return
+
     pending = await get_pending_draft(db_path, config.account_id)
     if pending is not None:
         await ctx.send(
@@ -919,6 +950,10 @@ async def cmd_run(ctx: commands.Context) -> None:
     db_path: str = acct_ctx["db_path"]
     dry_run: bool = acct_ctx["dry_run"]
 
+    if _is_killed(bot_data, config):
+        await ctx.send(f"[{config.account_id}] Bot is stopped. Use !killswitch to re-enable.")
+        return
+
     pending = await get_pending_draft(db_path, config.account_id)
     if pending is not None:
         await ctx.send(
@@ -988,6 +1023,10 @@ async def cmd_approve(ctx: commands.Context) -> None:
 
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
+
+    if _is_killed(bot_data, config):
+        await ctx.send(f"[{config.account_id}] Bot is stopped. Use !killswitch to re-enable.")
+        return
 
     draft = await get_pending_draft(db_path, config.account_id)
     if draft is None:
@@ -1165,6 +1204,8 @@ async def cmd_status(ctx: commands.Context) -> None:
         lines.append(f"Preferred time: {sched['preferred_time']}")
         lines.append(f"Paused: {'Yes' if sched['paused'] else 'No'}")
         lines.append(f"Auto-publish: {'On' if sched.get('auto_publish') else 'Off'}")
+        if sched.get("killed"):
+            lines.append("Killswitch: ACTIVE (all activity stopped)")
     else:
         lines.append(f"Frequency: {config.post_frequency} (default)")
         lines.append(f"Preferred time: {config.preferred_time} (default)")
@@ -1373,6 +1414,75 @@ async def cmd_setfrequency(ctx: commands.Context, value: str = "") -> None:
     await ctx.send(f"[{config.account_id}] Posting frequency changed to {value}.")
 
 
+async def cmd_killswitch(ctx: commands.Context) -> None:
+    """Handle !killswitch — toggle all bot activity on/off for this account."""
+    bot = ctx.bot
+    bot_data = bot.bot_data
+    channel_id = ctx.channel.id
+
+    acct_ctx = _get_account_context(bot_data, channel_id)
+    if acct_ctx is None:
+        await ctx.send("No account is configured for this channel.")
+        return
+
+    config: AccountConfig = acct_ctx["config"]
+    db_path: str = acct_ctx["db_path"]
+    key = _killswitch_key(config.account_id)
+
+    if _is_killed(bot_data, config):
+        # --- RE-ENABLE ---
+        bot_data.pop(key, None)
+        await _upsert_schedule_config(
+            db_path, config.account_id, paused=0, killed=0, timezone=config.timezone
+        )
+
+        # Resume scheduler job
+        scheduler = bot_data.get("scheduler")
+        if scheduler is not None:
+            job_id = pipeline_job_id(config.account_id)
+            job = scheduler.get_job(job_id)
+            if job is not None:
+                job.resume()
+
+        await ctx.send(f"[{config.account_id}] Bot re-enabled. Scheduler resumed.")
+        logger.info("Killswitch OFF for '%s'.", config.account_id)
+    else:
+        # --- KILL ---
+        bot_data[key] = True
+        await _upsert_schedule_config(
+            db_path, config.account_id, paused=1, killed=1, timezone=config.timezone
+        )
+
+        # Pause scheduler job
+        scheduler = bot_data.get("scheduler")
+        if scheduler is not None:
+            job_id = pipeline_job_id(config.account_id)
+            job = scheduler.get_job(job_id)
+            if job is not None:
+                job.pause()
+
+        # Cancel auto-publish timer
+        task_key = _auto_publish_task_key(config.account_id)
+        task = bot_data.get(task_key)
+        if task is not None and not task.done():
+            task.cancel()
+            bot_data.pop(task_key, None)
+
+        # Skip any pending draft
+        draft = await get_pending_draft(db_path, config.account_id)
+        if draft is not None:
+            await _update_draft_status(db_path, draft["id"], "skipped")
+            _cleanup_draft_images(draft)
+            logger.info("Pending draft %d skipped by killswitch.", draft["id"])
+
+        await ctx.send(
+            f"[{config.account_id}] Bot stopped. "
+            "Scheduler paused, auto-publish cancelled, pending draft discarded. "
+            "Use !killswitch to re-enable."
+        )
+        logger.info("Killswitch ON for '%s'.", config.account_id)
+
+
 # ---------------------------------------------------------------------------
 # Image cleanup helper
 # ---------------------------------------------------------------------------
@@ -1414,6 +1524,12 @@ async def _handle_photo_message(bot: commands.Bot, message: discord.Message) -> 
     config: AccountConfig = acct_ctx["config"]
     db_path: str = acct_ctx["db_path"]
     dry_run: bool = acct_ctx["dry_run"]
+
+    if _is_killed(bot_data, config):
+        await message.channel.send(
+            f"[{config.account_id}] Bot is stopped. Use !killswitch to re-enable."
+        )
+        return
 
     pending = await get_pending_draft(db_path, config.account_id)
     if pending is not None:
@@ -1502,6 +1618,16 @@ async def _resume_overdue_drafts(bot: commands.Bot) -> None:
         config: AccountConfig = acct_ctx["config"]
         db_path: str = acct_ctx["db_path"]
 
+        # Restore killswitch state from DB on startup
+        sched = await _get_schedule_config(db_path, config.account_id)
+        if sched and sched.get("killed"):
+            bot_data[_killswitch_key(config.account_id)] = True
+            logger.info("Killswitch restored for '%s' on startup.", config.account_id)
+
+        if _is_killed(bot_data, config):
+            logger.info("Killswitch active for '%s' — skipping draft resume.", config.account_id)
+            continue
+
         draft = await get_pending_draft(db_path, config.account_id)
         if draft is None:
             logger.info("No pending drafts to resume for account '%s'.", config.account_id)
@@ -1514,8 +1640,6 @@ async def _resume_overdue_drafts(bot: commands.Bot) -> None:
         if channel is None:
             logger.error("Channel %d not found — cannot resume draft for '%s'.", channel_id, config.account_id)
             continue
-
-        sched = await _get_schedule_config(db_path, config.account_id)
         auto_pub = sched["auto_publish"] if sched else 0
 
         if not auto_pub:
@@ -1639,6 +1763,7 @@ def build_bot(
     bot.command(name="resume")(cmd_resume)
     bot.command(name="autopublish")(cmd_autopublish)
     bot.command(name="setfrequency")(cmd_setfrequency)
+    bot.command(name="killswitch")(cmd_killswitch)
 
     # on_ready: resume overdue drafts
     @bot.event

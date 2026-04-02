@@ -225,6 +225,12 @@ async def init_db(db_path: str) -> None:
                 "ALTER TABLE schedule_config ADD COLUMN auto_publish INTEGER NOT NULL DEFAULT 0"
             )
 
+        # Migration: add killed column to schedule_config if missing (killswitch)
+        if "killed" not in columns:
+            await db.execute(
+                "ALTER TABLE schedule_config ADD COLUMN killed INTEGER NOT NULL DEFAULT 0"
+            )
+
         # Migration: add content_type column to pending_drafts if missing
         cursor = await db.execute("PRAGMA table_info(pending_drafts)")
         draft_columns = {row[1] for row in await cursor.fetchall()}
