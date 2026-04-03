@@ -1,0 +1,46 @@
+account_id: "veggie_alternatives"
+instagram_user_id_env: "VEGGIE_IG_USER_ID"
+access_token_env: "VEGGIE_IG_TOKEN"
+
+niche: "Natural vegetarian meat alternatives"
+language: "en"
+
+allowed_products:
+  - tempeh
+  - seitan
+  - legumes
+  - lentils
+  - jackfruit
+  - mushrooms
+  - tofu
+  - eggs
+  - fish
+
+banned_topics:
+  - ultra-processed fake meat
+  - Beyond Meat / Impossible (processed)
+
+tone: "educational, warm, inspiring"
+visual_style: "natural food photography, bright, farm-fresh aesthetic"
+
+post_frequency: "1d"
+preferred_time: "08:00"
+timezone: "America/New_York"
+
+discord_bot_token_env: "DISCORD_BOT_TOKEN"
+discord_channel_id_env: "DISCORD_CHANNEL_ID"
+auto_publish_timeout_hours: 2
+
+content_pillars:
+  - ingredient_spotlight
+  - recipe
+  - nutrition_fact
+  - shopping_tip
+  - myth_bust
+
+image_sourcing:
+  stock_score_threshold: 0.7
+  sources: [unsplash, pexels]
+  fallback: gemini
+
+temp_http_port: 8765

@@ -1,8 +1,7 @@
 # Secrets
 .env
 
-# Account configs (contain niche/strategy details)
-accounts/*/config.yaml
+# Account databases
 accounts/*/*.db
 
 # Python
