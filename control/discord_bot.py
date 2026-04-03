@@ -420,6 +420,7 @@ async def _do_publish_draft(
 
     published_platforms: list[str] = []
     media_id: str | None = None
+    publish_succeeded = False
 
     try:
         if dry_run:
@@ -478,6 +479,7 @@ async def _do_publish_draft(
         )
 
         await _update_draft_status(db_path, draft_id, "published")
+        publish_succeeded = True
 
         source = "Auto-published" if auto else "Published"
         platform_str = ", ".join(published_platforms) if published_platforms else "none"
@@ -489,17 +491,21 @@ async def _do_publish_draft(
 
     except Exception as exc:
         logger.error("Publish failed for draft %d: %s", draft_id, exc, exc_info=True)
-        await _update_draft_status(db_path, draft_id, "failed")
-        await channel.send(content=f"Publish failed: {exc}")
+        # Keep draft as "pending" so it can be retried with !approve
+        await channel.send(
+            content=f"Publish failed: {exc}\nDraft kept — use `!approve` to retry or `!skip` to discard."
+        )
 
     finally:
-        for path in image_paths:
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                    logger.info("Cleaned up draft image: %s", path)
-                except OSError as exc:
-                    logger.warning("Failed to clean up image %s: %s", path, exc)
+        # Only delete media files after a successful publish
+        if publish_succeeded:
+            for path in image_paths:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                        logger.info("Cleaned up draft image: %s", path)
+                    except OSError as exc:
+                        logger.warning("Failed to clean up image %s: %s", path, exc)
 
     task_key = _auto_publish_task_key(config.account_id)
     bot_data.pop(task_key, None)

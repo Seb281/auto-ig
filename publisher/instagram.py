@@ -82,16 +82,26 @@ async def publish_carousel(
             len(image_paths),
         )
 
+        # Brief pause to let Railway's reverse proxy detect the listener
+        await asyncio.sleep(2)
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Step 1: Create child containers for each image
             child_ids: list[str] = []
             for i, img_path in enumerate(image_paths):
                 image_url = server.get_url(img_path)
+                logger.info(
+                    "Carousel child %d/%d — image URL for Meta API: %s",
+                    i + 1, len(image_paths), image_url,
+                )
                 child_id = await _create_carousel_child(
                     client, config.instagram_user_id, token, image_url
                 )
                 logger.info("Carousel child %d/%d created: %s", i + 1, len(image_paths), child_id)
                 child_ids.append(child_id)
+                # Pause between children to avoid triggering rate limits
+                if i < len(image_paths) - 1:
+                    await asyncio.sleep(3)
 
             # Step 2: Poll each child container until ready
             for i, child_id in enumerate(child_ids):
