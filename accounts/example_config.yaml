@@ -1,0 +1,47 @@
+# auto-ig account configuration template
+#
+# Copy this file to accounts/<your_account_id>/config.yaml
+# and customize it for your niche.
+
+account_id: "my_account"                  # must match the directory name
+instagram_user_id_env: "MY_IG_USER_ID"    # env var name holding your IG user ID
+access_token_env: "MY_IG_TOKEN"           # env var name holding your Meta Graph API token
+
+niche: "Your niche description here"
+language: "en"
+
+allowed_products:
+  - item one
+  - item two
+  - item three
+
+banned_topics:
+  - topic to avoid
+
+tone: "educational, warm, inspiring"
+visual_style: "bright, clean photography"
+
+# Schedule (also settable via !setfrequency in Discord)
+post_frequency: "1d"           # 1d | 2d | 3x | 2x | 1x
+preferred_time: "08:00"
+timezone: "America/New_York"
+
+discord_bot_token_env: "DISCORD_BOT_TOKEN"
+discord_channel_id_env: "MY_DISCORD_CHANNEL_ID"
+auto_publish_timeout_hours: 2
+
+content_pillars:
+  - pillar_one
+  - pillar_two
+  - pillar_three
+
+image_sourcing:
+  stock_score_threshold: 0.7     # below this → use AI generation
+  sources: [unsplash, pexels]    # order = priority
+  fallback: gemini
+
+temp_http_port: 8765             # use a unique port per account
+
+# Optional: enable Facebook cross-posting
+# platforms: [instagram, facebook]
+# facebook_page_token_env: "MY_FB_PAGE_TOKEN"

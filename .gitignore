@@ -1,6 +1,10 @@
 # Secrets
 .env
 
+# Account configs (contain niche/strategy details)
+accounts/*/config.yaml
+accounts/*/*.db
+
 # Python
 __pycache__/
 *.py[cod]
