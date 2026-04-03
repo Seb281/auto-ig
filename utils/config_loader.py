@@ -84,13 +84,35 @@ _GLOBAL_ENV_VARS = [
 ]
 
 
-def load_account_config(config_path: str) -> AccountConfig:
-    """Load an AccountConfig dataclass from a YAML file."""
-    with open(config_path, "r") as f:
-        raw = yaml.safe_load(f)
+def _load_raw_config(config_path: str) -> dict:
+    """Load raw YAML config from file, falling back to env var."""
+    if os.path.isfile(config_path):
+        with open(config_path, "r") as f:
+            raw = yaml.safe_load(f)
+        if raw is None:
+            raise ValueError(f"Config file is empty: {config_path}")
+        return raw
 
-    if raw is None:
-        raise ValueError(f"Config file is empty: {config_path}")
+    # Fallback: derive env var name from account_id directory name
+    # e.g. accounts/veggie_alternatives/config.yaml -> VEGGIE_ALTERNATIVES_CONFIG_YAML
+    account_id = os.path.basename(os.path.dirname(config_path))
+    env_key = f"{account_id.upper()}_CONFIG_YAML"
+    env_val = os.getenv(env_key)
+    if env_val:
+        logger.info("Config file not found at %s, loading from env var %s.", config_path, env_key)
+        raw = yaml.safe_load(env_val)
+        if raw is None:
+            raise ValueError(f"Env var {env_key} is empty or invalid YAML")
+        return raw
+
+    raise FileNotFoundError(
+        f"Config not found at {config_path} and env var {env_key} is not set"
+    )
+
+
+def load_account_config(config_path: str) -> AccountConfig:
+    """Load an AccountConfig dataclass from a YAML file or env var."""
+    raw = _load_raw_config(config_path)
 
     missing = [k for k in _REQUIRED_ACCOUNT_KEYS if k not in raw]
     if missing:
