@@ -49,7 +49,7 @@ FITNESS_DISCORD_CHANNEL_ID=...
 
 ### 3. Attach a Volume
 
-Create a Volume in Railway and mount it at `/app/accounts` for SQLite persistence.
+Create a Volume in Railway and mount it at `/app/data` for SQLite persistence.
 
 ### 4. Enable public URL
 

@@ -131,8 +131,9 @@ async def main() -> None:
             logger.error("Env var validation failed for '%s': %s — skipping.", account_id, exc)
             continue
 
-        # Initialize database
-        db_path = os.path.join(base_dir, "accounts", account_id, "post_history.db")
+        # Initialize database (use data/ dir for persistence, e.g. Railway volume)
+        data_dir = os.path.join(base_dir, "data", account_id)
+        db_path = os.path.join(data_dir, "post_history.db")
         try:
             await init_db(db_path)
         except Exception as exc:
