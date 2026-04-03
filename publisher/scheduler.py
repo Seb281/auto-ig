@@ -28,10 +28,6 @@ logger = logging.getLogger(__name__)
 # Default job ID prefix for pipeline runs
 _PIPELINE_JOB_PREFIX = "pipeline_run"
 
-# Legacy constant kept for backwards compatibility
-PIPELINE_JOB_ID = _PIPELINE_JOB_PREFIX
-
-
 def pipeline_job_id(account_id: str) -> str:
     """Return the unique scheduler job ID for a given account."""
     return f"{_PIPELINE_JOB_PREFIX}_{account_id}"
@@ -168,12 +164,10 @@ def schedule_pipeline_job(
     frequency: str,
     preferred_time: str,
     timezone_str: str,
-    job_id: str = PIPELINE_JOB_ID,
-    account_id: str | None = None,
+    account_id: str,
 ) -> None:
     """Remove any existing pipeline job and add a new one with the given schedule."""
-    # Use per-account job ID if account_id is provided
-    effective_job_id = pipeline_job_id(account_id) if account_id else job_id
+    effective_job_id = pipeline_job_id(account_id)
 
     trigger = frequency_to_trigger(frequency, preferred_time, timezone_str)
 
@@ -204,7 +198,7 @@ def schedule_pipeline_job(
 
 
 def get_next_run_time(
-    scheduler: AsyncIOScheduler, job_id: str = PIPELINE_JOB_ID
+    scheduler: AsyncIOScheduler, job_id: str
 ) -> str | None:
     """Return the next scheduled run time as ISO 8601, or None."""
     job = scheduler.get_job(job_id)

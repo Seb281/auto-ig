@@ -31,5 +31,6 @@ docs/
 .DS_Store
 Thumbs.db
 
+CLAUDE.md
 .claude
 .worktrees

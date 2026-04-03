@@ -256,53 +256,6 @@ def build_reviewer_vision_prompt(
     return "\n".join(lines)
 
 
-def build_reviewer_text_prompt(
-    config: AccountConfig,
-    brief: PlannerBrief,
-    caption: str,
-    hashtags: list[str],
-) -> str:
-    """Build the prompt for text-only caption review (no image)."""
-    allowed = ", ".join(config.allowed_products)
-    banned = ", ".join(config.banned_topics)
-
-    hashtag_str = ", ".join(f"#{tag}" for tag in hashtags)
-
-    lines = [
-        f"You are a brand safety reviewer for an Instagram account about {config.niche}.",
-        f"Tone: {config.tone}.",
-        f"Allowed products/ingredients: {allowed}.",
-        f"Banned topics (must NOT appear): {banned}.",
-        "",
-        "Content brief for this post:",
-        f"  Topic: {brief.topic}",
-        f"  Angle: {brief.angle}",
-        f"  Content pillar: {brief.content_pillar}",
-        "",
-        "Caption to review:",
-        caption,
-        "",
-        f"Hashtags: {hashtag_str}",
-        "",
-        "Review the caption and hashtags for:",
-        "1. Banned content: Any reference to banned topics?",
-        "2. Tone: Educational, warm, inspiring? No fear-mongering?",
-        "3. Factual claims: Are claims reasonable and not misleading?",
-        "4. Hashtag relevance: Are hashtags targeted and appropriate?",
-        "",
-        "Return your answer as strict JSON with NO extra text:",
-        '{"status": "PASS or FAIL", "reasons": ["reason1", "reason2"], "retry_type": "caption or null"}',
-        "",
-        "Rules:",
-        '- status must be exactly "PASS" or "FAIL".',
-        "- reasons must be an empty array [] if PASS.",
-        "- If FAIL, reasons must list specific problems found.",
-        '- retry_type: "caption" if problems found, null if PASS.',
-    ]
-
-    return "\n".join(lines)
-
-
 def build_facebook_caption(caption: str, hashtags: list[str]) -> str:
     """Adapt an Instagram caption for Facebook (fewer hashtags)."""
     # Facebook performs better with 0-2 hashtags instead of 3-5
