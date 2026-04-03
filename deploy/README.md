@@ -210,7 +210,7 @@ Each account has:
    ```
 2. Edit key fields:
    - `account_id`: must match the directory name
-   - `instagram_user_id`: the new account's IG user ID
+   - `instagram_user_id_env`: unique env var name (e.g., `MY_NEW_IG_USER_ID`)
    - `access_token_env`: unique env var name (e.g., `MY_NEW_IG_TOKEN`)
    - `discord_channel_id_env`: unique env var name (e.g., `MY_NEW_DISCORD_CHANNEL_ID`)
    - `temp_http_port`: unique port number (e.g., 8767)

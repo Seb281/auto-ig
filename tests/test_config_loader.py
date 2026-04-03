@@ -23,7 +23,7 @@ def _minimal_config_dict():
     """Return a minimal valid config dict for YAML serialization."""
     return {
         "account_id": "test",
-        "instagram_user_id": "123",
+        "instagram_user_id_env": "TEST_IG_USER_ID",
         "access_token_env": "TEST_TOKEN",
         "niche": "food",
         "language": "en",
@@ -57,12 +57,14 @@ def _write_yaml(path, data):
 # ---------------------------------------------------------------------------
 
 class TestLoadAccountConfig:
-    def test_valid_config(self, tmp_path):
+    def test_valid_config(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TEST_IG_USER_ID", "123")
         cfg_path = str(tmp_path / "config.yaml")
         _write_yaml(cfg_path, _minimal_config_dict())
         config = load_account_config(cfg_path)
         assert isinstance(config, AccountConfig)
         assert config.account_id == "test"
+        assert config.instagram_user_id == "123"
         assert isinstance(config.image_sourcing, ImageSourcingConfig)
 
     def test_missing_required_key(self, tmp_path):
@@ -88,13 +90,15 @@ class TestLoadAccountConfig:
         with pytest.raises(ValueError, match="Missing image_sourcing keys"):
             load_account_config(cfg_path)
 
-    def test_optional_platforms_default(self, tmp_path):
+    def test_optional_platforms_default(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TEST_IG_USER_ID", "123")
         cfg_path = str(tmp_path / "config.yaml")
         _write_yaml(cfg_path, _minimal_config_dict())
         config = load_account_config(cfg_path)
         assert config.platforms == ["instagram"]
 
-    def test_optional_facebook_fields(self, tmp_path):
+    def test_optional_facebook_fields(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TEST_IG_USER_ID", "123")
         data = _minimal_config_dict()
         data["platforms"] = ["instagram", "facebook"]
         data["facebook_page_id"] = "pg_123"

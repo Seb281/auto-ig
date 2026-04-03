@@ -56,7 +56,7 @@ class AccountConfig:
 
 _REQUIRED_ACCOUNT_KEYS = [
     "account_id",
-    "instagram_user_id",
+    "instagram_user_id_env",
     "access_token_env",
     "niche",
     "language",
@@ -121,7 +121,7 @@ def load_account_config(config_path: str) -> AccountConfig:
 
     return AccountConfig(
         account_id=str(raw["account_id"]),
-        instagram_user_id=str(raw["instagram_user_id"]),
+        instagram_user_id=os.environ[str(raw["instagram_user_id_env"])],
         access_token_env=str(raw["access_token_env"]),
         niche=str(raw["niche"]),
         language=str(raw["language"]),
